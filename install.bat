@@ -124,10 +124,16 @@ if errorlevel 1 (
 )
 
 echo.
+echo [info] Chay environment doctor de kiem tra setup...
+python facefusion.py doctor
+
+echo.
 echo ============================================================
 echo  HOAN TAT
-echo  - Chay UI:               run.bat
-echo  - Chay UI ^(che do nhanh^): run.bat --quality fast
+echo  - Chay UI ^(HIGH preset^):   run.bat
+echo  - Clip ngan, ~6-8 GB VRAM: run.bat --quality balanced
+echo  - Real-time / preview:    run.bat --quality fast
 echo  - Headless / CLI:         run.bat headless-run -s src.jpg -t tgt.mp4 -o out.mp4
+echo  - Chuan doan moi truong:  python facefusion.py doctor
 echo ============================================================
 exit /b 0

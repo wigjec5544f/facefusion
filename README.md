@@ -61,18 +61,29 @@ Windows quick-start
 For Windows users a one-shot bootstrap is included:
 
 ```
-install.bat              :: cài Python (qua winget nếu thiếu), ffmpeg, venv, deps, model
-install_modules.bat      :: chỉ cài Python modules + onnxruntime vào venv hiện tại
-run.bat                  :: activate venv và chạy app, mặc định preset HIGH QUALITY
-run.bat --quality fast   :: chạy với config mặc định (nhanh hơn)
+install.bat                :: cài Python (qua winget nếu thiếu), ffmpeg, venv, deps, model
+install_modules.bat        :: chỉ cài Python modules + onnxruntime vào venv hiện tại
+run.bat                    :: activate venv và chạy app, mặc định preset HIGH QUALITY
+run.bat --quality balanced :: clip ngắn, ~6-8 GB VRAM
+run.bat --quality fast     :: real-time / preview, máy yếu
+run.bat --quality default  :: dùng facefusion.ini gốc
 run.bat headless-run -s src.jpg -t tgt.mp4 -o out.mp4
 ```
 
 `install.bat` tự động phát hiện GPU NVIDIA và chọn `cuda`, ngược lại fallback `directml`. Có thể ép biến thể: `install.bat cuda | directml | openvino | qnn | rocm | migraphx | default`.
 
 
-High quality preset
--------------------
+Quality presets
+---------------
+
+Bốn preset config có sẵn, chọn qua `run.bat --quality <name>` hoặc `--config-path facefusion.<name>.ini`:
+
+| Preset    | File                           | VRAM     | Use case                            |
+|-----------|--------------------------------|----------|-------------------------------------|
+| `high`    | `facefusion.high-quality.ini`  | 12+ GB   | output chất lượng cao nhất (mặc định) |
+| `balanced`| `facefusion.balanced.ini`      | 6-8 GB   | clip ngắn, GPU tầm trung            |
+| `fast`    | `facefusion.fast.ini`          | <4 GB    | real-time / preview / iGPU          |
+| `default` | `facefusion.ini`               | -        | config gốc của repo                  |
 
 `facefusion.high-quality.ini` là preset đã tinh chỉnh để output ảnh/video chân thực và sắc nét nhất:
 
@@ -91,7 +102,19 @@ python facefusion.py run --config-path facefusion.high-quality.ini
 python facefusion.py headless-run --config-path facefusion.high-quality.ini -s src.jpg -t tgt.mp4 -o out.mp4
 ```
 
-Đánh đổi: chậm hơn ~3–5× và VRAM ~1.5–2× so với preset mặc định. Nếu thiếu VRAM, đổi `[memory] video_memory_strategy = moderate` (hoặc `strict`), hoặc giảm `face_swapper_pixel_boost` xuống `512x512`.
+Đánh đổi: chậm hơn ~3–5× và VRAM ~1.5–2× so với preset mặc định. Nếu thiếu VRAM, đổi `[memory] video_memory_strategy = moderate` (hoặc `strict`), hoặc giảm `face_swapper_pixel_boost` xuống `512x512`, hoặc dùng `run.bat --quality balanced`.
+
+
+Environment doctor
+------------------
+
+Kiểm tra môi trường (Python, ffmpeg, onnxruntime providers, đường dẫn ghi được, RAM, dung lượng đĩa):
+
+```
+python facefusion.py doctor
+```
+
+In ra bảng status (`ok` / `warn` / `fail`) và exit code 0 nếu tất cả checks pass, 1 nếu có check fail. Hữu ích sau `install.bat` để xác nhận bootstrap đã đầy đủ.
 
 
 Documentation

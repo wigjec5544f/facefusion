@@ -43,6 +43,12 @@ if not exist ".venv\Scripts\activate.bat" (
 call ".venv\Scripts\activate.bat"
 
 REM ---- Chon config theo quality ----
+REM Preset alias:
+REM   high     -> facefusion.high-quality.ini  (max realism, >=12 GB VRAM)
+REM   balanced -> facefusion.balanced.ini      (clip ngan, ~6-8 GB VRAM)
+REM   fast     -> facefusion.fast.ini          (real-time / preview)
+REM   default  -> facefusion.ini               (config goc cua repo)
+REM   <name>   -> facefusion.<name>.ini        (user-defined preset)
 set "CONFIG_FLAG="
 if /I "%QUALITY%"=="high" (
     if exist "facefusion.high-quality.ini" (
@@ -51,8 +57,20 @@ if /I "%QUALITY%"=="high" (
     ) else (
         echo [warn] Khong thay facefusion.high-quality.ini, dung config mac dinh.
     )
+) else if /I "%QUALITY%"=="balanced" (
+    if exist "facefusion.balanced.ini" (
+        set "CONFIG_FLAG=--config-path facefusion.balanced.ini"
+        echo [info] Quality preset: BALANCED ^(facefusion.balanced.ini^)
+    ) else (
+        echo [warn] Khong thay facefusion.balanced.ini, dung config mac dinh.
+    )
 ) else if /I "%QUALITY%"=="fast" (
-    echo [info] Quality preset: FAST ^(facefusion.ini mac dinh^)
+    if exist "facefusion.fast.ini" (
+        set "CONFIG_FLAG=--config-path facefusion.fast.ini"
+        echo [info] Quality preset: FAST ^(facefusion.fast.ini^)
+    ) else (
+        echo [info] Quality preset: FAST ^(facefusion.ini mac dinh^)
+    )
 ) else if /I "%QUALITY%"=="default" (
     echo [info] Quality preset: DEFAULT ^(facefusion.ini mac dinh^)
 ) else (

@@ -5,7 +5,7 @@ import signal
 import sys
 from time import time
 
-from facefusion import benchmarker, cli_helper, content_analyser, face_classifier, face_detector, face_landmarker, face_masker, face_recognizer, hash_helper, logger, state_manager, translator, voice_extractor
+from facefusion import benchmarker, cli_helper, content_analyser, doctor, face_classifier, face_detector, face_landmarker, face_masker, face_recognizer, hash_helper, logger, state_manager, translator, voice_extractor
 from facefusion.args import apply_args, collect_job_args, reduce_job_args, reduce_step_args
 from facefusion.download import conditional_download_hashes, conditional_download_sources
 from facefusion.exit_helper import hard_exit, signal_exit
@@ -48,6 +48,10 @@ def route(args : Args) -> None:
 
 	if state_manager.get_item('command') == 'force-download':
 		error_code = force_download()
+		hard_exit(error_code)
+
+	if state_manager.get_item('command') == 'doctor':
+		error_code = doctor.render()
 		hard_exit(error_code)
 
 	if state_manager.get_item('command') == 'benchmark':
