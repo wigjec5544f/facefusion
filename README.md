@@ -55,6 +55,45 @@ commands:
 ```
 
 
+Windows quick-start
+-------------------
+
+For Windows users a one-shot bootstrap is included:
+
+```
+install.bat              :: cài Python (qua winget nếu thiếu), ffmpeg, venv, deps, model
+install_modules.bat      :: chỉ cài Python modules + onnxruntime vào venv hiện tại
+run.bat                  :: activate venv và chạy app, mặc định preset HIGH QUALITY
+run.bat --quality fast   :: chạy với config mặc định (nhanh hơn)
+run.bat headless-run -s src.jpg -t tgt.mp4 -o out.mp4
+```
+
+`install.bat` tự động phát hiện GPU NVIDIA và chọn `cuda`, ngược lại fallback `directml`. Có thể ép biến thể: `install.bat cuda | directml | openvino | qnn | rocm | migraphx | default`.
+
+
+High quality preset
+-------------------
+
+`facefusion.high-quality.ini` là preset đã tinh chỉnh để output ảnh/video chân thực và sắc nét nhất:
+
+- detector `many` 640×640, landmarker `many`, score 0.5 — bắt face nghiêng/nhỏ tốt hơn.
+- mask = `box + occlusion (xseg_3) + region (bisenet_resnet_34)` — chống lộ tay/kính, giữ tóc/mắt/miệng.
+- `face_swapper_model = hyperswap_1c_256` với `pixel_boost = 1024x1024` — model chạy trên crop 1024 thay vì 256.
+- `expression_restorer = live_portrait` factor 80 (upper + lower face) — giữ biểu cảm tự nhiên của target.
+- `face_enhancer = gpen_bfr_2048` blend 80 — nâng chi tiết da/mắt mà không bị "plastic skin".
+- `frame_enhancer = clear_reality_x4` blend 50 — khử noise toàn frame, giữ texture tự nhiên.
+- output: `temp_frame_format = png` (lossless), `libx264 veryslow` quality 95, audio `flac`.
+
+Cách dùng:
+
+```
+python facefusion.py run --config-path facefusion.high-quality.ini
+python facefusion.py headless-run --config-path facefusion.high-quality.ini -s src.jpg -t tgt.mp4 -o out.mp4
+```
+
+Đánh đổi: chậm hơn ~3–5× và VRAM ~1.5–2× so với preset mặc định. Nếu thiếu VRAM, đổi `[memory] video_memory_strategy = moderate` (hoặc `strict`), hoặc giảm `face_swapper_pixel_boost` xuống `512x512`.
+
+
 Documentation
 -------------
 
