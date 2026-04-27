@@ -117,6 +117,35 @@ python facefusion.py doctor
 In ra bảng status (`ok` / `warn` / `fail`) và exit code 0 nếu tất cả checks pass, 1 nếu có check fail. Hữu ích sau `install.bat` để xác nhận bootstrap đã đầy đủ.
 
 
+Custom model mirror
+-------------------
+
+Mặc định FaceFusion tải model từ `facefusion/facefusion-assets` (GitHub Releases) và `facefusion/*` (HuggingFace). Nếu bạn muốn dùng mirror riêng (vd: HuggingFace org của chính bạn để host weight bổ sung), set environment variable trước khi chạy:
+
+| Variable | Áp dụng cho provider | Ví dụ |
+| --- | --- | --- |
+| `FACEFUSION_HF_NAMESPACE` | `huggingface` | `wigjec5544f` (resolve sang `https://huggingface.co/wigjec5544f/<base_name>/resolve/main/<file>`) |
+| `FACEFUSION_GH_NAMESPACE` | `github` | `wigjec5544f/facefusion-assets` (resolve sang `https://github.com/wigjec5544f/facefusion-assets/releases/download/<base_name>/<file>`) |
+
+Nếu mirror của bạn vẫn dùng đúng layout repo và đúng file hash như upstream, các processor sẽ download bình thường. Nếu hash không khớp, hash check sẽ fail — bạn cần publish hash file đúng từ weight gốc.
+
+Mirror chỉ thay namespace; URL gốc (`huggingface.co`, `github.com`) không đổi. Để override hoàn toàn URL gốc, sửa `facefusion/choices.py::download_provider_set`.
+
+
+Optional Python extras
+----------------------
+
+`pyproject.toml` khai báo extras để chuẩn bị cho các Đợt sau:
+
+```
+pip install -e .[dev]         # flake8 + pytest cho contributor
+pip install -e .[diffusion]   # diffusers + transformers + torch (Đợt 2)
+pip install -e .[api]         # httpx + pydantic (Đợt 4-5, motion control / video synth API)
+```
+
+Bootstrap chính (`install.bat` / `install.py`) vẫn là path duy nhất được test cho user cuối — extras chủ yếu để dev và CI dùng.
+
+
 Documentation
 -------------
 

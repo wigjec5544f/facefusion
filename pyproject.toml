@@ -1,0 +1,76 @@
+[build-system]
+requires = [ "setuptools>=68", "wheel" ]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "facefusion"
+version = "3.6.1"
+description = "Industry leading face manipulation platform"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "OpenRAIL-AS" }
+authors = [ { name = "Henry Ruhs" } ]
+keywords = [ "face-swap", "face-fusion", "deepfake", "lip-sync", "image-restoration", "video" ]
+classifiers = [
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.10",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Programming Language :: Python :: 3.13",
+	"Operating System :: OS Independent",
+	"Intended Audience :: End Users/Desktop",
+	"Intended Audience :: Science/Research",
+	"Topic :: Multimedia :: Graphics",
+	"Topic :: Multimedia :: Video"
+]
+dynamic = [ "dependencies" ]
+
+[project.urls]
+Homepage = "https://facefusion.io"
+Repository = "https://github.com/facefusion/facefusion"
+
+[project.optional-dependencies]
+# Lint / test toolchain
+dev = [
+	"flake8>=7",
+	"pytest>=8",
+	"pytest-mock>=3"
+]
+# Diffusion runtime — populated in Đợt 2 (B2). Listing the umbrella deps here
+# unblocks `pip install -e .[diffusion]` once the adapter lands.
+diffusion = [
+	"diffusers>=0.30",
+	"transformers>=4.44",
+	"accelerate>=0.34",
+	"safetensors>=0.4",
+	"torch>=2.3"
+]
+# Cloud / API processors — populated in Đợt 4-5 (E1, E2-E4). Kept narrow to
+# avoid leaking heavy deps into the default install.
+api = [
+	"httpx>=0.27",
+	"pydantic>=2.6"
+]
+
+[project.scripts]
+facefusion = "facefusion.core:cli"
+
+[tool.setuptools.dynamic]
+dependencies = { file = [ "requirements.txt" ] }
+
+[tool.setuptools.packages.find]
+include = [ "facefusion*" ]
+exclude = [ "tests*", ".assets*", ".caches*", ".jobs*" ]
+
+[tool.pytest.ini_options]
+testpaths = [ "tests" ]
+python_files = [ "test_*.py" ]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_return_any = false
+no_implicit_optional = true

@@ -12,6 +12,17 @@ from facefusion.filesystem import get_file_name, get_file_size, is_file, remove_
 from facefusion.hash_helper import validate_hash
 from facefusion.types import Command, DownloadProvider, DownloadSet
 
+PROVIDER_DEFAULT_NAMESPACE =\
+{
+	'github': 'facefusion/facefusion-assets',
+	'huggingface': 'facefusion'
+}
+PROVIDER_NAMESPACE_ENV_VAR =\
+{
+	'github': 'FACEFUSION_GH_NAMESPACE',
+	'huggingface': 'FACEFUSION_HF_NAMESPACE'
+}
+
 
 def open_curl(commands : List[Command]) -> subprocess.Popen[bytes]:
 	commands = curl_builder.run(commands)
@@ -167,9 +178,34 @@ def resolve_download_url(base_name : str, file_name : str) -> Optional[str]:
 
 def resolve_download_url_by_provider(download_provider : DownloadProvider, base_name : str, file_name : str) -> Optional[str]:
 	download_provider_value = facefusion.choices.download_provider_set.get(download_provider)
+	namespace_override = resolve_provider_namespace_override(download_provider)
 
 	for download_provider_url in download_provider_value.get('urls'):
 		if ping_static_url(download_provider_url):
-			return download_provider_url + download_provider_value.get('path').format(base_name = base_name, file_name = file_name)
+			path = download_provider_value.get('path').format(base_name = base_name, file_name = file_name)
+			if namespace_override:
+				path = apply_namespace_override(path, download_provider, namespace_override)
+			return download_provider_url + path
 
 	return None
+
+
+def resolve_provider_namespace_override(download_provider : DownloadProvider) -> Optional[str]:
+	env_var = PROVIDER_NAMESPACE_ENV_VAR.get(download_provider)
+
+	if env_var:
+		value = os.environ.get(env_var)
+		if value:
+			return value.strip().strip('/')
+	return None
+
+
+def apply_namespace_override(path : str, download_provider : DownloadProvider, namespace : str) -> str:
+	default_namespace = PROVIDER_DEFAULT_NAMESPACE.get(download_provider)
+
+	if not default_namespace:
+		return path
+	prefix = '/' + default_namespace + '/'
+	if path.startswith(prefix):
+		return '/' + namespace.strip('/') + '/' + path[len(prefix):]
+	return path
