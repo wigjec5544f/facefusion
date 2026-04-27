@@ -375,6 +375,110 @@ def test_animate_portrait_extracts_motion_from_target_vision_frame() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Regression: with multiple source images, _build_source_state must not
+# call `face in face_list` -- Face is a namedtuple containing numpy arrays
+# and `==` would raise ValueError. Devin Review BUG_37a6d69a_0001.
+
+
+class _FakeFace:
+	"""Minimal Face stand-in whose tuple equality blows up like the real Face."""
+
+	def __init__(self, label : str) -> None:
+		self.label = label
+		self.bounding_box = numpy.array([ 0.0, 0.0, 1.0, 1.0 ], dtype = numpy.float32)
+		self.embedding = numpy.zeros((512,), dtype = numpy.float32)
+		self.landmark_set = { '5/68': numpy.zeros((5, 2), dtype = numpy.float32) }
+
+	def __eq__(self, other : object) -> bool:  # pragma: no cover - exercised in test
+		# Mirror the real Face namedtuple semantics: comparing a numpy
+		# array with `==` returns an ndarray, and `bool(ndarray)` raises
+		# when ndarray.size > 1. We surface that exact failure mode so
+		# any future regression that uses `==` / `in` on Face is caught.
+		raise ValueError("The truth value of an array with more than one element is ambiguous.")
+
+	def __hash__(self) -> int:
+		return id(self)
+
+
+def test_build_source_state_does_not_eq_compare_faces_across_frames() -> None:
+	# Two distinct source frames, each with one face. Largest-face
+	# selection picks the one from frame B. The buggy `face in list`
+	# code would call `face_b == face_a` here and raise ValueError
+	# from numpy's ambiguous-truth on the bounding_box comparison.
+	frame_a = numpy.full((512, 512, 3), 10, dtype = numpy.uint8)
+	frame_b = numpy.full((512, 512, 3), 20, dtype = numpy.uint8)
+	face_a = _FakeFace('a')
+	face_b = _FakeFace('b')
+
+	def _get_many_faces(frames):
+		# Match the real signature: list of frames in, flat face list out.
+		# Identity matters -- the production code returns the same Python
+		# object on subsequent calls (face_store cache), and the fix
+		# relies on `is` comparison, so we mirror that here.
+		out = []
+		for frame in frames:
+			# Use the constant pixel value as a frame id.
+			fid = int(frame[0, 0, 0])
+			if fid == 10:
+				out.append(face_a)
+			elif fid == 20:
+				out.append(face_b)
+		return out
+
+	def _sort_faces(faces, _order):
+		# Largest-first: pretend face_b is bigger.
+		return [ face_b, face_a ]
+
+	def _get_one_face(faces):
+		return faces[0] if faces else None
+
+	def _read_static_images(paths):
+		return [ frame_a, frame_b ]
+
+	def _filter_image_paths(paths):
+		return list(paths)
+
+	def _warp(frame, _landmark, _template, _size):
+		return frame[:32, :32].copy(), numpy.eye(2, 3, dtype = numpy.float32)
+
+	def _prepare(crop):
+		return numpy.zeros((1, 3, 16, 16), dtype = numpy.float32)
+
+	def _forward_feature(_input):
+		return numpy.zeros((1, 32, 16, 64, 64), dtype = numpy.float32)
+
+	def _forward_motion(_input):
+		return\
+		(
+			numpy.float32(0.0),
+			numpy.float32(0.0),
+			numpy.float32(0.0),
+			numpy.array([[ 1.0 ]], dtype = numpy.float32),
+			numpy.zeros((1, 3), dtype = numpy.float32),
+			numpy.zeros((1, 21, 3), dtype = numpy.float32),
+			numpy.zeros((1, 21, 3), dtype = numpy.float32)
+		)
+
+	state_manager.init_item('source_paths', [ '/tmp/portrait_a.png', '/tmp/portrait_b.png' ])
+
+	with \
+		patch.object(portrait_animator_core, 'read_static_images', side_effect = _read_static_images), \
+		patch.object(portrait_animator_core, 'filter_image_paths', side_effect = _filter_image_paths), \
+		patch.object(portrait_animator_core, 'get_many_faces', side_effect = _get_many_faces), \
+		patch.object(portrait_animator_core, 'sort_faces_by_order', side_effect = _sort_faces), \
+		patch.object(portrait_animator_core, 'get_one_face', side_effect = _get_one_face), \
+		patch.object(portrait_animator_core, 'warp_face_by_face_landmark_5', side_effect = _warp), \
+		patch.object(portrait_animator_core, 'prepare_crop_frame', side_effect = _prepare), \
+		patch.object(portrait_animator_core, 'forward_extract_feature', side_effect = _forward_feature), \
+		patch.object(portrait_animator_core, 'forward_extract_motion', side_effect = _forward_motion):
+		# Must NOT raise ValueError ("truth value of an array is ambiguous").
+		state = portrait_animator_core._resolve_source_state()
+
+	assert state is not None
+	assert 'feature_volume' in state
+
+
+# ---------------------------------------------------------------------------
 # Pixel I/O helpers (deterministic, no ONNX).
 
 

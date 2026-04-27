@@ -359,11 +359,19 @@ def _build_source_state(source_image_paths : Tuple[str, ...]) -> Optional[dict]:
 	if source_face is None:
 		return None
 
-	# pick the source frame that actually contained the chosen face
+	# Pick the source frame that actually contained the chosen face.
+	# `Face` is a namedtuple holding numpy arrays (bounding_box, embedding,
+	# ...); using `in` / `==` on it would invoke numpy's element-wise
+	# equality and raise "truth value of an array is ambiguous" whenever
+	# two non-identical Face objects were compared. The `face_store`
+	# memoises faces per-frame, so the chosen `source_face` is the very
+	# same Python object that came out of one of the per-frame
+	# `get_many_faces([frame])` calls -- compare by identity to avoid the
+	# ambiguous-truth crash in the multi-source case.
 	source_vision_frame = None
 	for candidate_frame in source_vision_frames:
 		candidate_faces = get_many_faces([ candidate_frame ])
-		if source_face in candidate_faces:
+		if any(source_face is candidate_face for candidate_face in candidate_faces):
 			source_vision_frame = candidate_frame
 			break
 	if source_vision_frame is None:
