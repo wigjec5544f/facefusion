@@ -157,7 +157,7 @@ def register_args(program : ArgumentParser) -> None:
 	if group_processors:
 		group_processors.add_argument('--lip-syncer-model', help = translator.get('help.model', __package__), default = config.get_str_value('processors', 'lip_syncer_model', 'wav2lip_gan_96'), choices = lip_syncer_choices.lip_syncer_models)
 		group_processors.add_argument('--lip-syncer-weight', help = translator.get('help.weight', __package__), type = float, default = config.get_float_value('processors', 'lip_syncer_weight', '0.5'), choices = lip_syncer_choices.lip_syncer_weight_range, metavar = create_float_metavar(lip_syncer_choices.lip_syncer_weight_range))
-		group_processors.add_argument('--lip-syncer-research-models', help = translator.get('help.lip_syncer_research_models'), action = 'store_true', default = config.get_bool_value('processors', 'lip_syncer_research_models', 'false'))
+		group_processors.add_argument('--lip-syncer-research-models', help = translator.get('help.lip_syncer_research_models'), action = 'store_true', default = config.get_bool_value('processors', 'lip_syncer_research_models', 'False'))
 		facefusion.jobs.job_store.register_step_keys([ 'lip_syncer_model', 'lip_syncer_weight', 'lip_syncer_research_models' ])
 
 

@@ -140,3 +140,27 @@ def test_apply_args_defaults_research_flag_to_none_when_absent() -> None:
 	# Missing keys come through as ``None`` so the state ends up false-y;
 	# this matches the existing behaviour for other optional flags.
 	assert captured.get('lip_syncer_research_models') is None
+
+
+def test_register_args_uses_capital_cased_bool_fallback() -> None:
+	# `cast_bool` (facefusion/common_helper.py) is case-sensitive: it
+	# only round-trips the strings 'True' / 'False' (capitalised);
+	# lowercase 'false' returns None. Lock in the convention by
+	# inspecting the source so a future regression -- changing the
+	# fallback to 'false' -- is caught here instead of by a review bot.
+	import inspect
+
+	from facefusion.common_helper import cast_bool
+
+	assert cast_bool('False') is False
+	assert cast_bool('True') is True
+	# Sentinel: the lowercase form must NOT be accepted -- if this
+	# assertion ever flips, the comment above and the whole reason for
+	# this test goes away.
+	assert cast_bool('false') is None
+
+	source = inspect.getsource(lip_syncer_core.register_args)
+	assert "'lip_syncer_research_models', 'False'" in source, (
+		"register_args must pass capitalised 'False' as the .ini fallback "
+		"-- lowercase 'false' silently parses to None via cast_bool."
+	)
