@@ -101,6 +101,17 @@ def open_writer(output_path : pathlib.Path, width : int, height : int, target_fp
 	return subprocess.Popen(cmd, stdin = subprocess.PIPE)
 
 
+def _safe_write(process : subprocess.Popen, payload : bytes) -> bool:
+	"""Write payload to process.stdin; return False if the encoder pipe is broken."""
+	if process.stdin is None:
+		return False
+	try:
+		process.stdin.write(payload)
+		return True
+	except (BrokenPipeError, OSError):
+		return False
+
+
 def init_inference_state(execution_providers : List[str]) -> None:
 	"""Initialize the minimal state_manager keys that inference_manager needs."""
 	if state_manager.get_item('execution_device_ids') is None:
@@ -145,26 +156,39 @@ def run(input_path : pathlib.Path, output_path : pathlib.Path, multiplier : int,
 	frame_count = 0
 	pair_count = 0
 	prev_frame : Optional[numpy.ndarray] = None
+	encoder_died = False
 	try:
 		for frame in iter_source_frames(input_path, width, height):
 			if prev_frame is not None:
-				writer.stdin.write(prev_frame.tobytes())
+				if not _safe_write(writer, prev_frame.tobytes()):
+					encoder_died = True
+					break
 				frame_count += 1
 				for intermediate in interpolate_frames(prev_frame, frame, multiplier):
-					writer.stdin.write(intermediate.tobytes())
+					if not _safe_write(writer, intermediate.tobytes()):
+						encoder_died = True
+						break
 					frame_count += 1
+				if encoder_died:
+					break
 				pair_count += 1
 				if pair_count % 25 == 0:
 					print(f'  processed {pair_count} pairs ({frame_count} output frames)')
 			prev_frame = frame
-		if prev_frame is not None:
-			writer.stdin.write(prev_frame.tobytes())
-			frame_count += 1
+		if not encoder_died and prev_frame is not None:
+			if _safe_write(writer, prev_frame.tobytes()):
+				frame_count += 1
 	finally:
 		if writer.stdin is not None:
-			writer.stdin.close()
+			try:
+				writer.stdin.close()
+			except (BrokenPipeError, OSError):
+				pass
 		writer.wait()
 
+	if writer.returncode != 0:
+		print(f'ffmpeg encoder exited with code {writer.returncode}', file = sys.stderr)
+		return 4
 	print(f'wrote {frame_count} frames -> {output_path}')
 	return 0
 

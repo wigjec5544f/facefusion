@@ -63,6 +63,28 @@ def test_main_argparse_defaults(tmp_path : pathlib.Path) -> None:
 	reason = 'ffmpeg/ffprobe not on PATH')
 @pytest.mark.skipif(not os.path.isfile(pathlib.Path(__file__).resolve().parent.parent / '.assets' / 'models' / 'rife_4_9.onnx'),
 	reason = 'rife_4_9.onnx not downloaded')
+def test_run_returns_nonzero_on_encoder_failure(tmp_path : pathlib.Path) -> None:
+	source_path = tmp_path / 'src.mp4'
+	subprocess.run(
+		[
+			'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+			'-f', 'lavfi', '-i', 'testsrc=duration=1:size=32x32:rate=10',
+			'-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+			str(source_path)
+		],
+		check = True
+	)
+	# An obviously bogus codec name triggers an ffmpeg error during encoder init,
+	# but pipe buffering can hide that from `writer.stdin.write`. The CLI must
+	# inspect `returncode` and surface the failure.
+	rc = interpolate_video.run(source_path, tmp_path / 'dst.mp4', multiplier = 2, codec = 'this_codec_does_not_exist', crf = 23, execution_providers = [ 'cpu' ])
+	assert rc != 0
+
+
+@pytest.mark.skipif(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
+	reason = 'ffmpeg/ffprobe not on PATH')
+@pytest.mark.skipif(not os.path.isfile(pathlib.Path(__file__).resolve().parent.parent / '.assets' / 'models' / 'rife_4_9.onnx'),
+	reason = 'rife_4_9.onnx not downloaded')
 def test_run_end_to_end(tmp_path : pathlib.Path) -> None:
 	source_path = tmp_path / 'src.mp4'
 	dest_path = tmp_path / 'dst.mp4'
