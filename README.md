@@ -147,6 +147,23 @@ python tools/hf_publish.py \
 
 Cờ `--hash-only` tính hash mà không upload (để kiểm tra cục bộ). Sau khi upload, kết hợp với `FACEFUSION_HF_NAMESPACE` (xem section trên) để facefusion download về từ mirror của bạn.
 
+Đã upload mẫu: [`ngoqquyen/facefusion-extras/frame_interpolator/rife_4_9.onnx`](https://huggingface.co/ngoqquyen/facefusion-extras/tree/main/frame_interpolator) (RIFE 4.9, MIT, ~21 MB) — dùng cho module `facefusion.frame_interpolator` (Đợt 1.A3).
+
+
+Frame interpolator (RIFE)
+-------------------------
+
+`facefusion.frame_interpolator` cung cấp inference primitive cho RIFE 4.x: lấy 2 frame liên tiếp + timestep ∈ [0,1] → trả về frame trung gian. Dùng để tăng fps (vd: 30 → 60).
+
+```python
+from facefusion import frame_interpolator
+mid_frame = frame_interpolator.interpolate_pair(prev_frame, next_frame, timestep = 0.5)
+```
+
+Đầu vào / đầu ra là `VisionFrame` (HxWx3 BGR uint8) — cùng format với phần còn lại của facefusion. Module tự download `rife_4_9.onnx` (21 MB) lần đầu chạy từ HF mirror (`ngoqquyen/facefusion-extras` mặc định, override bằng `FACEFUSION_HF_NAMESPACE` + `FACEFUSION_EXTRAS_REPO`).
+
+Pipeline integration (chạy interpolation lên cả video output) sẽ ship trong PR riêng — primitive này là building block.
+
 
 Optional Python extras
 ----------------------
