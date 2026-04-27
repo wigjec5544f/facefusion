@@ -21,21 +21,22 @@ from facefusion.workflows import image_to_image, image_to_video
 
 
 def cli() -> None:
-	if pre_check():
-		signal.signal(signal.SIGINT, signal_exit)
-		program = create_program()
+	if not pre_check_python():
+		hard_exit(2)
+	signal.signal(signal.SIGINT, signal_exit)
+	program = create_program()
 
-		if validate_args(program):
-			args = vars(program.parse_args())
-			apply_args(args, state_manager.init_item)
+	if validate_args(program):
+		args = vars(program.parse_args())
+		apply_args(args, state_manager.init_item)
 
-			if state_manager.get_item('command'):
-				logger.init(state_manager.get_item('log_level'))
-				route(args)
-			else:
-				program.print_help()
+		if state_manager.get_item('command'):
+			logger.init(state_manager.get_item('log_level'))
+			if state_manager.get_item('command') != 'doctor' and not pre_check_tooling():
+				hard_exit(2)
+			route(args)
 		else:
-			hard_exit(2)
+			program.print_help()
 	else:
 		hard_exit(2)
 
@@ -95,11 +96,14 @@ def route(args : Args) -> None:
 		hard_exit(error_code)
 
 
-def pre_check() -> bool:
+def pre_check_python() -> bool:
 	if sys.version_info < (3, 10):
 		logger.error(translator.get('python_not_supported').format(version = '3.10'), __name__)
 		return False
+	return True
 
+
+def pre_check_tooling() -> bool:
 	if not shutil.which('curl'):
 		logger.error(translator.get('curl_not_installed'), __name__)
 		return False
@@ -108,6 +112,10 @@ def pre_check() -> bool:
 		logger.error(translator.get('ffmpeg_not_installed'), __name__)
 		return False
 	return True
+
+
+def pre_check() -> bool:
+	return pre_check_python() and pre_check_tooling()
 
 
 def common_pre_check() -> bool:
