@@ -13,6 +13,6 @@ LipSyncerInputs = TypedDict('LipSyncerInputs',
 	'temp_vision_mask' : Mask
 })
 
-LipSyncerModel = Literal['edtalk_256', 'wav2lip_96', 'wav2lip_gan_96']
+LipSyncerModel = Literal['edtalk_256', 'wav2lip_96', 'wav2lip_gan_96', 'latentsync_1_5']
 
 LipSyncerWeight : TypeAlias = NDArray[Any]

@@ -108,6 +108,29 @@ def create_static_model_set(download_scope : DownloadScope) -> ModelSet:
 			},
 			'type': 'wav2lip',
 			'size': (96, 96)
+		},
+		'latentsync_1_5':
+		{
+			# Đợt 3.A2 PR-A: scaffold only. The DDIM sampler + audio Whisper
+			# encoder + VAE/UNet inference arrive in PR-B (which requires GPU
+			# to validate). Exposed only when --lip-syncer-research-models is
+			# explicitly set; pre_check rejects the model otherwise.
+			'__metadata__':
+			{
+				'vendor': 'ByteDance',
+				'license': 'Apache-2.0',
+				'year': 2025,
+				'research_only': True,
+				'paper': 'https://arxiv.org/abs/2412.09262',
+				'upstream': 'https://huggingface.co/ByteDance/LatentSync-1.5'
+			},
+			# Empty until PR-B publishes ONNX exports + hash sidecars to the
+			# configured model mirror. pre_check short-circuits before we
+			# touch these dicts, so the empty mappings stay inert.
+			'hashes': {},
+			'sources': {},
+			'type': 'latentsync_research',
+			'size': (256, 256)
 		}
 	}
 
@@ -134,17 +157,43 @@ def register_args(program : ArgumentParser) -> None:
 	if group_processors:
 		group_processors.add_argument('--lip-syncer-model', help = translator.get('help.model', __package__), default = config.get_str_value('processors', 'lip_syncer_model', 'wav2lip_gan_96'), choices = lip_syncer_choices.lip_syncer_models)
 		group_processors.add_argument('--lip-syncer-weight', help = translator.get('help.weight', __package__), type = float, default = config.get_float_value('processors', 'lip_syncer_weight', '0.5'), choices = lip_syncer_choices.lip_syncer_weight_range, metavar = create_float_metavar(lip_syncer_choices.lip_syncer_weight_range))
-		facefusion.jobs.job_store.register_step_keys([ 'lip_syncer_model', 'lip_syncer_weight' ])
+		group_processors.add_argument('--lip-syncer-research-models', help = translator.get('help.lip_syncer_research_models'), action = 'store_true', default = config.get_bool_value('processors', 'lip_syncer_research_models', 'False'))
+		facefusion.jobs.job_store.register_step_keys([ 'lip_syncer_model', 'lip_syncer_weight', 'lip_syncer_research_models' ])
 
 
 def apply_args(args : Args, apply_state_item : ApplyStateItem) -> None:
 	apply_state_item('lip_syncer_model', args.get('lip_syncer_model'))
 	apply_state_item('lip_syncer_weight', args.get('lip_syncer_weight'))
+	apply_state_item('lip_syncer_research_models', args.get('lip_syncer_research_models'))
 
 
 def pre_check() -> bool:
-	model_hash_set = get_model_options().get('hashes')
-	model_source_set = get_model_options().get('sources')
+	model_options = get_model_options()
+	model_metadata = model_options.get('__metadata__') or {}
+
+	if model_metadata.get('research_only'):
+		if not state_manager.get_item('lip_syncer_research_models'):
+			logger.error(
+				'lip_syncer model "{model}" is research-only; pass --lip-syncer-research-models to opt in (license: {license})'.format(
+					model = state_manager.get_item('lip_syncer_model'),
+					license = model_metadata.get('license', 'unknown')
+				),
+				__name__
+			)
+			return False
+		# Đợt 3.A2 PR-A scaffold: research_only models exist as schema only.
+		# The DDIM sampler / ONNX exports / Whisper audio path land in PR-B.
+		# Surface a clear pointer so users hitting the gate know what's next.
+		logger.error(
+			'lip_syncer model "{model}" is registered but its sampler is not yet implemented (Đợt 3.A2 PR-A scaffold; sampler ships in PR-B). See {upstream}'.format(
+				model = state_manager.get_item('lip_syncer_model'),
+				upstream = model_metadata.get('upstream', 'roadmap')
+			),
+			__name__
+		)
+		return False
+	model_hash_set = model_options.get('hashes')
+	model_source_set = model_options.get('sources')
 
 	return conditional_download_hashes(model_hash_set) and conditional_download_sources(model_source_set)
 
@@ -203,6 +252,12 @@ def sync_lip(target_face : Face, source_voice_frame : AudioFrame, temp_vision_fr
 		area_vision_frame = normalize_crop_frame(area_vision_frame)
 		crop_vision_frame = cv2.warpAffine(area_vision_frame, cv2.invertAffineTransform(area_matrix), (512, 512), borderMode = cv2.BORDER_REPLICATE)
 
+	if model_type == 'latentsync_research':
+		# Defensive belt-and-suspenders: pre_check already rejects this
+		# model in PR-A, but if any caller bypasses pre_check we surface a
+		# clear, actionable error rather than producing garbage output.
+		crop_vision_frame = forward_latentsync(source_voice_frame, crop_vision_frame)
+
 	crop_mask = numpy.minimum.reduce(crop_masks)
 	paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
 	return paste_vision_frame
@@ -220,6 +275,27 @@ def forward_edtalk(temp_audio_frame : AudioFrame, crop_vision_frame : VisionFram
 		})[0]
 
 	return crop_vision_frame
+
+
+def forward_latentsync(temp_audio_frame : AudioFrame, crop_vision_frame : VisionFrame) -> VisionFrame:
+	"""Stub for the LatentSync diffusion sampler.
+
+	Đợt 3.A2 PR-A only registers the schema (model entry, CLI gate,
+	dispatch routing). The actual inference path -- Whisper-Tiny audio
+	encoder, VAE encode/decode, audio-conditioned U-Net, DDIM sampler --
+	requires GPU validation and lands in PR-B together with ONNX exports
+	hosted on the configured model mirror.
+
+	If this function is reached at runtime, ``pre_check`` was bypassed
+	(direct import / library use); the explicit ``NotImplementedError``
+	makes that mistake immediately visible instead of producing garbage
+	frames.
+	"""
+	del temp_audio_frame, crop_vision_frame
+	raise NotImplementedError(
+		'LatentSync DDIM sampler is not implemented in this build. '
+		'See Đợt 3.A2 PR-B (ONNX export + sampler) on the roadmap.'
+	)
 
 
 def forward_wav2lip(temp_audio_frame : AudioFrame, area_vision_frame : VisionFrame) -> VisionFrame:
