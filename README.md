@@ -108,13 +108,25 @@ python facefusion.py headless-run --config-path facefusion.high-quality.ini -s s
 Environment doctor
 ------------------
 
-Kiểm tra môi trường (Python, ffmpeg, onnxruntime providers, đường dẫn ghi được, RAM, dung lượng đĩa):
+Kiểm tra môi trường (Python, ffmpeg, onnxruntime providers, GPU, đường dẫn ghi được, RAM, dung lượng đĩa, model cache):
 
 ```
 python facefusion.py doctor
 ```
 
 In ra bảng status (`ok` / `warn` / `fail`) và exit code 0 nếu tất cả checks pass, 1 nếu có check fail. Hữu ích sau `install.bat` để xác nhận bootstrap đã đầy đủ.
+
+Doctor v2 (Đợt 1.F4 mở rộng) bổ sung:
+
+- **GPU detection** (best-effort): tự dò NVIDIA qua `nvidia-smi` (in tên + VRAM + driver), AMD qua `rocm-smi`, Apple Silicon qua `system_profiler SPDisplaysDataType`. Không có GPU → `warn` chứ không `fail` (CPU-only là setup hợp lệ).
+- **Model inventory**: liệt kê số model `.onnx` đã tải về `<repo>/.assets/models/` + tổng dung lượng. Cảnh báo nếu có file `.hash` mồ côi (không có `.onnx` đi kèm).
+- **Model integrity**: thêm `--verify-models` để chạy CRC32 mọi model, so với sidecar `.hash`. Mismatch → `fail` (gợi ý re-download). Khá tốn vài giây vì hash toàn bộ vài GiB nên opt-in.
+
+Ví dụ:
+
+```
+python facefusion.py doctor --verify-models
+```
 
 
 Custom model mirror
