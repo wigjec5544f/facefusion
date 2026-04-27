@@ -164,6 +164,17 @@ mid_frame = frame_interpolator.interpolate_pair(prev_frame, next_frame, timestep
 
 Pipeline integration (chạy interpolation lên cả video output) sẽ ship trong PR riêng — primitive này là building block.
 
+Cho video CLI standalone (chain sau `headless-run`):
+
+```
+python tools/interpolate_video.py \
+  --input swap.mp4 \
+  --output swap_60fps.mp4 \
+  --multiplier 2          # 30->60 fps; dùng 3 cho 30->90, 4 cho 30->120
+```
+
+Tool đọc video qua ffmpeg pipe (không extract ra disk), gọi `interpolate_pair` cho mỗi cặp frame liên tiếp, ghi thẳng ra encoder. CRF mặc định 18, codec mặc định `libx264`. Override execution provider bằng `--execution-provider cuda` (lặp lại để chain `cuda → cpu`). Lần đầu chạy sẽ download `rife_4_9.onnx` ~21 MB từ HF mirror.
+
 
 Optional Python extras
 ----------------------
