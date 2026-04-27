@@ -145,6 +145,32 @@ PR-A sẽ luôn dừng pre_check với message `... sampler not yet implemented 
 PR-B (cần GPU thật để verify) sẽ thêm: ONNX export Whisper-Tiny / VAE / U-Net của LatentSync 1.5, DDIM sampler chạy trên ONNX components, audio path dùng Whisper embeddings (thay vì mel-spec như wav2lip), và upload weight + hash sidecar lên `ngoqquyen/facefusion-extras`. Tham khảo upstream: https://huggingface.co/ByteDance/LatentSync-1.5.
 
 
+Portrait animator (Đợt 4.D1)
+----------------------------
+
+Processor mới `portrait_animator` lấy **một bức ảnh chân dung làm nguồn** và một **video lái** (driving video) làm target, rồi animate ảnh nguồn theo head pose / biểu cảm của target. Pipeline tái dùng đúng bộ ONNX `live_portrait_feature_extractor` / `motion_extractor` / `generator` đã ship cho `expression_restorer` & `face_editor` (KwaiVGI LivePortrait, MIT) — không phải tải thêm model nào, không cần GPU để xác thực dispatch.
+
+Khác biệt với processor hiện có:
+- `face_swapper` chuyển **chỉ identity embedding** (texture / lighting đến từ target).
+- `expression_restorer` giữ identity của target, chỉ điều chỉnh biểu cảm trong cùng frame.
+- `portrait_animator` chuyển **toàn bộ appearance feature volume** của ảnh nguồn (face details, lighting trên mặt) và để target điều khiển pose + biểu cảm — output trông như người trong ảnh nguồn đang biểu diễn theo video lái.
+
+Cách dùng:
+
+```
+python facefusion.py headless-run --processors portrait_animator \
+    -s portrait.jpg -t driving.mp4 -o output.mp4 \
+    --portrait-animator-pose-weight 100 \
+    --portrait-animator-expression-weight 100
+```
+
+Hai cờ trọng số (`0..100`, mặc định `100` = follow hoàn toàn target):
+- `--portrait-animator-pose-weight`: tỉ lệ nghiêng/quay/lắc đầu đến từ target. `0` giữ pose tĩnh của ảnh nguồn, `100` follow đầy đủ video lái.
+- `--portrait-animator-expression-weight`: tỉ lệ biểu cảm (mắt / miệng / lông mày) đến từ target. Có thể đặt thấp để giảm rung biểu cảm trong target nhiễu mà vẫn theo pose.
+
+Output frame = background + face position của video lái, identity + appearance đến từ ảnh nguồn. Module cache appearance volume + canonical motion của ảnh nguồn (LRU 4 entries) — extract một lần / nguồn rồi tái dùng cho mọi frame trong cùng job.
+
+
 Custom model mirror
 -------------------
 
