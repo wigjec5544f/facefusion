@@ -131,14 +131,17 @@ def test_apply_args_propagates_three_keys() -> None:
 
 
 def _fake_source_state() -> Dict[str, Any]:
+	# Match the shapes that the LivePortrait ONNX motion_extractor emits:
+	# pitch/yaw/roll are 0-d (scalars), scale is (1, 1), translation is
+	# (1, 3), expression / motion_points are (1, 21, 3).
 	return\
 	{
 		'feature_volume': numpy.zeros((1, 32, 16, 64, 64), dtype = numpy.float32),
 		'motion_points': numpy.zeros((1, 21, 3), dtype = numpy.float32),
 		'rest_motion_points': numpy.zeros((1, 21, 3), dtype = numpy.float32),
-		'pitch': numpy.array([ 0.0 ], dtype = numpy.float32),
-		'yaw': numpy.array([ 0.0 ], dtype = numpy.float32),
-		'roll': numpy.array([ 0.0 ], dtype = numpy.float32),
+		'pitch': numpy.float32(0.0),
+		'yaw': numpy.float32(0.0),
+		'roll': numpy.float32(0.0),
 		'scale': numpy.array([[ 1.0 ]], dtype = numpy.float32),
 		'translation': numpy.zeros((1, 3), dtype = numpy.float32),
 		'expression': numpy.zeros((1, 21, 3), dtype = numpy.float32)
@@ -292,6 +295,83 @@ def test_process_frame_invokes_animate_per_target_face() -> None:
 
 	assert animate_calls == fake_faces
 	assert out_mask is mask
+
+
+# ---------------------------------------------------------------------------
+# Regression: driving motion must come from `target_vision_frame`, not from
+# the chain-accumulated `temp_vision_frame`. If a previous processor (e.g.
+# `face_swapper`) modified the face, extracting motion from `temp_vision_frame`
+# would feed the motion extractor a non-driver. Devin Review BUG_2a826f23_0001.
+
+
+def test_animate_portrait_extracts_motion_from_target_vision_frame() -> None:
+	target_frame = numpy.full((512, 512, 3), 200, dtype = numpy.uint8)
+	temp_frame = numpy.full((512, 512, 3), 50, dtype = numpy.uint8)
+
+	class _FakeFace:
+		landmark_set = { '5/68': numpy.zeros((5, 2), dtype = numpy.float32) }
+
+	source_state = _fake_source_state()
+
+	def _warp(frame, _landmark, _template, size):
+		return frame[:size[0], :size[1]].copy(), numpy.eye(2, 3, dtype = numpy.float32)
+
+	def _box(crop, _blur, _padding):
+		return numpy.ones(crop.shape[:2], dtype = numpy.float32)
+
+	# Each call returns the (unique) input back so we can prove which
+	# frame was used as the motion-extractor input. Float values aren't
+	# representative of real motion outputs but cover the unpacking shape.
+	prepare_inputs : list = []
+
+	def _prepare(crop):
+		prepare_inputs.append(int(crop[0, 0, 0]))
+		# Return shape (1, 3, 256, 256) for downstream stub call.
+		return numpy.zeros((1, 3, 256, 256), dtype = numpy.float32)
+
+	def _forward_motion(_input):
+		# Pitch/yaw/roll come out of the LivePortrait motion_extractor as
+		# scalars so `scipy ... from_euler('xyz', [pitch, yaw, roll])`
+		# resolves to a single 3x3 rotation. Match that shape contract
+		# here (numpy.float32(0.0) == ndim 0).
+		return\
+		(
+			numpy.float32(0.0),
+			numpy.float32(0.0),
+			numpy.float32(0.0),
+			numpy.array([[ 1.0 ]], dtype = numpy.float32),
+			numpy.zeros((1, 3), dtype = numpy.float32),
+			numpy.zeros((1, 21, 3), dtype = numpy.float32),
+			numpy.zeros((1, 21, 3), dtype = numpy.float32)
+		)
+
+	def _forward_generate(_volume, _src, _tgt):
+		return numpy.zeros((3, 256, 256), dtype = numpy.float32)
+
+	def _paste(temp, _crop, _mask, _affine):
+		return temp
+
+	with \
+		patch.object(portrait_animator_core, '_resolve_source_state', return_value = source_state), \
+		patch.object(portrait_animator_core, 'warp_face_by_face_landmark_5', side_effect = _warp), \
+		patch.object(portrait_animator_core, 'create_box_mask', side_effect = _box), \
+		patch.object(portrait_animator_core, 'prepare_crop_frame', side_effect = _prepare), \
+		patch.object(portrait_animator_core, 'forward_extract_motion', side_effect = _forward_motion), \
+		patch.object(portrait_animator_core, 'forward_generate_frame', side_effect = _forward_generate), \
+		patch.object(portrait_animator_core, 'paste_back', side_effect = _paste):
+		state_manager.init_item('portrait_animator_pose_weight', 100)
+		state_manager.init_item('portrait_animator_expression_weight', 100)
+		state_manager.init_item('face_mask_blur', 0.3)
+		state_manager.init_item('face_mask_types', [])
+		portrait_animator_core.animate_portrait(_FakeFace(), target_frame, temp_frame)
+
+	# The single call to prepare_crop_frame inside animate_portrait must
+	# operate on the target (driver) crop = pixel value 200, not the
+	# temp/chain-modified crop = pixel value 50.
+	assert prepare_inputs == [ 200 ], (
+		"animate_portrait fed a non-driver frame to the motion extractor; "
+		"see Devin Review BUG_2a826f23_0001"
+	)
 
 
 # ---------------------------------------------------------------------------

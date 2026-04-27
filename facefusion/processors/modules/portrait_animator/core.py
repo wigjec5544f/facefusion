@@ -243,11 +243,20 @@ def animate_portrait(target_face : Face, target_vision_frame : VisionFrame, temp
 
 	model_template = get_model_options().get('template')
 	model_size = get_model_options().get('size')
-	target_crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), model_template, model_size)
-	box_mask = create_box_mask(target_crop_vision_frame, state_manager.get_item('face_mask_blur'), (0, 0, 0, 0))
+	# Driving motion (pose / expression) MUST come from the original
+	# target frame; using `temp_vision_frame` would feed the motion
+	# extractor whatever the previous processor in the chain produced
+	# (e.g. a face_swapper output), which is no longer the real driver.
+	# `temp_vision_frame` is only used for the paste-back affine matrix
+	# and the masks, so the animated face lands in the right place on
+	# top of the chain's accumulated background. This mirrors the split
+	# already used by `expression_restorer.restore_expression`.
+	target_crop_vision_frame, _ = warp_face_by_face_landmark_5(target_vision_frame, target_face.landmark_set.get('5/68'), model_template, model_size)
+	temp_crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), model_template, model_size)
+	box_mask = create_box_mask(temp_crop_vision_frame, state_manager.get_item('face_mask_blur'), (0, 0, 0, 0))
 	crop_masks = [ box_mask ]
 	if 'occlusion' in (state_manager.get_item('face_mask_types') or []):
-		crop_masks.append(create_occlusion_mask(target_crop_vision_frame))
+		crop_masks.append(create_occlusion_mask(temp_crop_vision_frame))
 
 	target_input = prepare_crop_frame(target_crop_vision_frame)
 	tgt_pitch, tgt_yaw, tgt_roll, _, _, tgt_expression, _ = forward_extract_motion(target_input)
@@ -266,7 +275,7 @@ def animate_portrait(target_face : Face, target_vision_frame : VisionFrame, temp
 
 	animated_crop = forward_generate_frame(source_state['feature_volume'], driven_motion_points, source_state['rest_motion_points'])
 	animated_crop = normalize_crop_frame(animated_crop)
-	animated_crop = cv2.resize(animated_crop, (target_crop_vision_frame.shape[1], target_crop_vision_frame.shape[0]), interpolation = cv2.INTER_CUBIC)
+	animated_crop = cv2.resize(animated_crop, (temp_crop_vision_frame.shape[1], temp_crop_vision_frame.shape[0]), interpolation = cv2.INTER_CUBIC)
 
 	crop_mask = numpy.minimum.reduce(crop_masks).clip(0, 1)
 	return paste_back(temp_vision_frame, animated_crop, crop_mask, affine_matrix)
