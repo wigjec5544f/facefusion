@@ -189,7 +189,8 @@ LOCALES : Locales =\
 			'job_retry': 'retry a failed job',
 			'job_retry_all': 'retry all failed jobs',
 			'doctor': 'diagnose the environment and report status',
-			'verify_models': 'verify CRC32 of every downloaded ONNX model against its .hash sidecar (slower; opt-in)'
+			'verify_models': 'verify CRC32 of every downloaded ONNX model against its .hash sidecar (slower; opt-in)',
+			'lip_syncer_research_models': 'opt-in to research-grade lip syncer models (e.g. latentsync_1_5); these are gated because they require additional setup and GPU validation'
 		},
 		'doctor_header': 'environment diagnostic for facefusion {version}',
 		'doctor_summary_ok': 'doctor: all checks passed',

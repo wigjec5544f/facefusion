@@ -129,6 +129,22 @@ python facefusion.py doctor --verify-models
 ```
 
 
+Research-grade lip syncer (Đợt 3.A2)
+------------------------------------
+
+PR-A đăng ký scaffold cho `latentsync_1_5` (LatentSync 1.5, ByteDance, Apache-2.0) trong `--lip-syncer-model`, **chưa có sampler thực thi**. Mục đích: chốt schema + opt-in flag + dispatch routing để PR-B chỉ cần cắm phần inference.
+
+Bật opt-in:
+
+```
+python facefusion.py headless-run --processors lip_syncer --lip-syncer-model latentsync_1_5 --lip-syncer-research-models -s ... -t ... -o ...
+```
+
+PR-A sẽ luôn dừng pre_check với message `... sampler not yet implemented (Đợt 3.A2 PR-A scaffold; sampler ships in PR-B)`. Đây là hành vi cố ý — tránh PR-A vô tình chạy tạo output rác.
+
+PR-B (cần GPU thật để verify) sẽ thêm: ONNX export Whisper-Tiny / VAE / U-Net của LatentSync 1.5, DDIM sampler chạy trên ONNX components, audio path dùng Whisper embeddings (thay vì mel-spec như wav2lip), và upload weight + hash sidecar lên `ngoqquyen/facefusion-extras`. Tham khảo upstream: https://huggingface.co/ByteDance/LatentSync-1.5.
+
+
 Custom model mirror
 -------------------
 
