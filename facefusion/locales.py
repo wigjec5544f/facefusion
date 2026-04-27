@@ -146,6 +146,7 @@ LOCALES : Locales =\
 			'output_video_quality': 'specify the video quality which translates to the video compression',
 			'output_video_scale': 'specify the video scale based on the target video',
 			'output_video_fps': 'specify the video fps based on the target video',
+			'frame_interpolator_target_fps': 'when set, run RIFE frame interpolation on the rendered video to reach this output fps (e.g. 60); leave unset to skip',
 			'processors': 'load a single or multiple processors (choices: {choices}, ...)',
 			'background-remover-model': 'choose the model responsible for removing the background',
 			'background-remover-color': 'apply red, green blue and alpha values of the background',
