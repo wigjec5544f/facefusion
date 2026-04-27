@@ -59,3 +59,26 @@ def test_main_requires_token_when_uploading(tmp_path : pathlib.Path, monkeypatch
 
 	rc = hf_publish.main([ '--source', str(weight_path), '--repo-id', 'ngoqquyen/facefusion-extras' ])
 	assert rc == 2
+
+
+def test_derive_hash_dest_simple() -> None:
+	assert hf_publish.derive_hash_dest('rife_4_26.onnx') == 'rife_4_26.hash'
+
+
+def test_derive_hash_dest_subdir() -> None:
+	assert hf_publish.derive_hash_dest('frame_interpolator/rife_4_26.onnx') == 'frame_interpolator/rife_4_26.hash'
+
+
+def test_derive_hash_dest_directory_with_dot() -> None:
+	# Directory contains a dot; only the filename suffix should change.
+	assert hf_publish.derive_hash_dest('models.v2/inswapper.onnx') == 'models.v2/inswapper.hash'
+
+
+def test_derive_hash_dest_no_extension() -> None:
+	# File without an extension should still get .hash appended.
+	assert hf_publish.derive_hash_dest('models.v2/checkpoint') == 'models.v2/checkpoint.hash'
+
+
+def test_derive_hash_dest_multiple_dots_in_filename() -> None:
+	# Only the final suffix (.bin) is replaced.
+	assert hf_publish.derive_hash_dest('weights/rife.4.26.bin') == 'weights/rife.4.26.hash'

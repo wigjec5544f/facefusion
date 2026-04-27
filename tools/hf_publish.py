@@ -44,6 +44,12 @@ def write_hash_file(weight_path : pathlib.Path) -> pathlib.Path:
 	return hash_path
 
 
+def derive_hash_dest(dest_path : str) -> str:
+	# Repo-relative paths use forward slashes; with_suffix only touches the
+	# filename component, so directories containing dots are preserved.
+	return str(pathlib.PurePosixPath(dest_path).with_suffix('.hash'))
+
+
 def upload_pair(repo_id : str, weight_path : pathlib.Path, dest_path : str, token : str) -> None:
 	from huggingface_hub import HfApi  # local import so --hash-only works without huggingface_hub
 
@@ -52,7 +58,7 @@ def upload_pair(repo_id : str, weight_path : pathlib.Path, dest_path : str, toke
 	if not hash_path.exists():
 		raise SystemExit('hash file missing: ' + str(hash_path))
 
-	dest_hash = dest_path.rsplit('.', 1)[0] + '.hash'
+	dest_hash = derive_hash_dest(dest_path)
 	api.upload_file(
 		path_or_fileobj = str(weight_path),
 		path_in_repo = dest_path,
@@ -102,7 +108,7 @@ def main(argv : Optional[list] = None) -> int:
 	dest_path = args.dest or source_path.name
 	upload_pair(args.repo_id, source_path, dest_path, token)
 	print(f'uploaded {source_path.name} -> https://huggingface.co/{args.repo_id}/resolve/main/{dest_path}')
-	print(f'uploaded {hash_path.name} -> https://huggingface.co/{args.repo_id}/resolve/main/{dest_path.rsplit(".", 1)[0]}.hash')
+	print(f'uploaded {hash_path.name} -> https://huggingface.co/{args.repo_id}/resolve/main/{derive_hash_dest(dest_path)}')
 	return 0
 
 
