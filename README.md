@@ -162,7 +162,25 @@ mid_frame = frame_interpolator.interpolate_pair(prev_frame, next_frame, timestep
 
 Đầu vào / đầu ra là `VisionFrame` (HxWx3 BGR uint8) — cùng format với phần còn lại của facefusion. Module tự download `rife_4_9.onnx` (21 MB) lần đầu chạy từ HF mirror (`ngoqquyen/facefusion-extras` mặc định, override bằng `FACEFUSION_HF_NAMESPACE` + `FACEFUSION_EXTRAS_REPO`).
 
-Pipeline integration (chạy interpolation lên cả video output) sẽ ship trong PR riêng — primitive này là building block.
+Pipeline integration đã ship — thêm cờ `--frame-interpolator-target-fps 60` vào lệnh `headless-run` thì RIFE sẽ tự chạy ở cuối pipeline (sau `restore_audio`) và overwrite output. Multiplier được chọn = `round(target_fps / output_video_fps)` (tối thiểu 2). Khi `target_fps ≤ output_video_fps` thì bỏ qua. Nếu interpolation lỗi, output gốc giữ nguyên (rc=0, log warning).
+
+```
+python facefusion.py headless-run \
+  --source-paths face.png --target-path video.mp4 --output-path out.mp4 \
+  --processors face_swapper face_enhancer \
+  --frame-interpolator-target-fps 60
+```
+
+Cho workflow độc lập (vd: chỉ tăng fps mà không swap), dùng CLI:
+
+```
+python tools/interpolate_video.py \
+  --input swap.mp4 \
+  --output swap_60fps.mp4 \
+  --multiplier 2          # 30->60 fps; dùng 3 cho 30->90, 4 cho 30->120
+```
+
+Tool đọc video qua ffmpeg pipe (không extract ra disk), gọi `interpolate_pair` cho mỗi cặp frame liên tiếp, ghi thẳng ra encoder. CRF mặc định 18, codec mặc định `libx264`. Override execution provider bằng `--execution-provider cuda` (lặp lại để chain `cuda → cpu`). Lần đầu chạy sẽ download `rife_4_9.onnx` ~21 MB từ HF mirror.
 
 
 Optional Python extras

@@ -1,10 +1,11 @@
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 
 import numpy
 from tqdm import tqdm
 
-from facefusion import ffmpeg
+from facefusion import ffmpeg, frame_interpolator
 from facefusion import logger, process_manager, state_manager, translator, video_manager
 from facefusion.audio import create_empty_audio_frame, get_audio_frame, get_voice_frame
 from facefusion.common_helper import get_first
@@ -26,6 +27,7 @@ def process(start_time : float) -> ErrorCode:
 		process_video,
 		merge_frames,
 		restore_audio,
+		interpolate_output_video,
 		partial(finalize_video, start_time)
 	]
 	process_manager.start()
@@ -149,6 +151,55 @@ def restore_audio() -> ErrorCode:
 					return 4
 				logger.warn(translator.get('restoring_audio_skipped'), __name__)
 				move_temp_file(state_manager.get_item('target_path'), state_manager.get_item('output_path'))
+	return 0
+
+
+def interpolate_output_video() -> ErrorCode:
+	target_fps = state_manager.get_item('frame_interpolator_target_fps')
+	if not target_fps:
+		return 0
+
+	source_fps = state_manager.get_item('output_video_fps') or 0
+	if source_fps <= 0:
+		logger.warn('frame_interpolator_target_fps set but output_video_fps is unknown; skipping interpolation', __name__)
+		return 0
+	if target_fps <= source_fps:
+		logger.warn(f'frame_interpolator_target_fps ({target_fps}) <= output_video_fps ({source_fps}); skipping interpolation', __name__)
+		return 0
+
+	multiplier = max(2, int(round(target_fps / source_fps)))
+	output_path = state_manager.get_item('output_path')
+	if not output_path or not is_video(output_path):
+		logger.warn('frame_interpolator: output video missing; skipping interpolation', __name__)
+		return 0
+
+	logger.info(f'interpolating {output_path} from {source_fps} fps to ~{source_fps * multiplier} fps (multiplier {multiplier})', __name__)
+	# Preserve the original extension so ffmpeg picks the right container.
+	stem, ext = os.path.splitext(output_path)
+	temp_path = stem + '.interp' + (ext or '.mp4')
+	rc = frame_interpolator.interpolate_video_file(
+		input_path = output_path,
+		output_path = temp_path,
+		multiplier = multiplier,
+		video_encoder = state_manager.get_item('output_video_encoder'),
+		video_quality = state_manager.get_item('output_video_quality'),
+		video_preset = state_manager.get_item('output_video_preset')
+	)
+	if rc != 0:
+		logger.error(f'frame interpolation failed (code {rc}); leaving original output untouched', __name__)
+		try:
+			os.remove(temp_path)
+		except OSError:
+			pass
+		return 0
+
+	try:
+		os.replace(temp_path, output_path)
+	except OSError as exception:
+		logger.error(f'failed to move interpolated video into place: {exception}', __name__)
+		return 1
+	video_manager.clear_video_pool()
+	logger.debug('frame interpolation succeeded', __name__)
 	return 0
 
 
