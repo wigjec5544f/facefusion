@@ -18,6 +18,7 @@ from facefusion.face_masker import create_area_mask, create_box_mask, create_occ
 from facefusion.face_selector import select_faces, sort_faces_by_order
 from facefusion.filesystem import filter_image_paths, has_image, in_directory, is_image, is_video, resolve_relative_path, same_file_extension
 from facefusion.model_helper import get_static_model_initializer
+from facefusion.processors.batching import run_with_dynamic_batch, stack_prepared_frames
 from facefusion.processors.modules.face_swapper import choices as face_swapper_choices
 from facefusion.processors.modules.face_swapper.types import FaceSwapperInputs
 from facefusion.processors.pixel_boost import explode_pixel_boost, implode_pixel_boost
@@ -596,11 +597,10 @@ def swap_face(source_face : Face, target_face : Face, temp_vision_frame : Vision
 		crop_masks.append(occlusion_mask)
 
 	pixel_boost_vision_frames = implode_pixel_boost(crop_vision_frame, pixel_boost_total, model_size)
-	for pixel_boost_vision_frame in pixel_boost_vision_frames:
-		pixel_boost_vision_frame = prepare_crop_frame(pixel_boost_vision_frame)
-		pixel_boost_vision_frame = forward_swap_face(source_face, target_face, pixel_boost_vision_frame)
-		pixel_boost_vision_frame = normalize_crop_frame(pixel_boost_vision_frame)
-		temp_vision_frames.append(pixel_boost_vision_frame)
+	prepared_pixel_boost_frames = [ prepare_crop_frame(tile) for tile in pixel_boost_vision_frames ]
+	swapped_batch = forward_swap_face_batch(source_face, target_face, prepared_pixel_boost_frames)
+	for swapped_index in range(swapped_batch.shape[0]):
+		temp_vision_frames.append(normalize_crop_frame(swapped_batch[swapped_index]))
 	crop_vision_frame = explode_pixel_boost(temp_vision_frames, pixel_boost_total, model_size, pixel_boost_size)
 
 	if 'area' in state_manager.get_item('face_mask_types'):
@@ -617,10 +617,13 @@ def swap_face(source_face : Face, target_face : Face, temp_vision_frame : Vision
 	return paste_vision_frame
 
 
-def forward_swap_face(source_face : Face, target_face : Face, crop_vision_frame : VisionFrame) -> VisionFrame:
+def _build_swap_face_base_inputs(source_face : Face, target_face : Face) -> dict:
+	"""Build the per-call constant feed for the swap session (everything
+	except the 'target' image tensor). Extracted so batched and looped
+	paths share the same logic."""
 	face_swapper = get_inference_pool().get('face_swapper')
 	model_type = get_model_options().get('type')
-	face_swapper_inputs = {}
+	base_inputs : dict = {}
 
 	if is_macos() and has_execution_provider('coreml') and model_type in [ 'ghost', 'uniface' ]:
 		face_swapper.set_providers([ facefusion.choices.execution_provider_set.get('cpu') ])
@@ -628,18 +631,39 @@ def forward_swap_face(source_face : Face, target_face : Face, crop_vision_frame 
 	for face_swapper_input in face_swapper.get_inputs():
 		if face_swapper_input.name == 'source':
 			if model_type in [ 'blendswap', 'uniface' ]:
-				face_swapper_inputs[face_swapper_input.name] = prepare_source_frame(source_face)
+				base_inputs[face_swapper_input.name] = prepare_source_frame(source_face)
 			else:
 				source_embedding = prepare_source_embedding(source_face)
 				source_embedding = balance_source_embedding(source_embedding, target_face.embedding)
-				face_swapper_inputs[face_swapper_input.name] = source_embedding
-		if face_swapper_input.name == 'target':
-			face_swapper_inputs[face_swapper_input.name] = crop_vision_frame
+				base_inputs[face_swapper_input.name] = source_embedding
+	return base_inputs
+
+
+def forward_swap_face(source_face : Face, target_face : Face, crop_vision_frame : VisionFrame) -> VisionFrame:
+	face_swapper = get_inference_pool().get('face_swapper')
+	face_swapper_inputs = _build_swap_face_base_inputs(source_face, target_face)
+	face_swapper_inputs['target'] = crop_vision_frame
 
 	with conditional_thread_semaphore():
 		crop_vision_frame = face_swapper.run(None, face_swapper_inputs)[0][0]
 
 	return crop_vision_frame
+
+
+def forward_swap_face_batch(source_face : Face, target_face : Face, prepared_crop_vision_frames : List[VisionFrame]) -> VisionFrame:
+	"""Run the face-swap model once for an entire pixel-boost tile batch
+	(or other per-frame multi-crop scenario). When the underlying ONNX
+	session declares a dynamic batch axis on its 'target' input, all tiles
+	go through a single session.run call -- otherwise we transparently fall
+	back to N sequential calls so observable behaviour is identical.
+	Returns a (N, C, H, W) array; the caller is responsible for splitting
+	and normalizing each tile."""
+	face_swapper = get_inference_pool().get('face_swapper')
+	base_inputs = _build_swap_face_base_inputs(source_face, target_face)
+	batched_targets = stack_prepared_frames(prepared_crop_vision_frames)
+
+	with conditional_thread_semaphore():
+		return run_with_dynamic_batch(face_swapper, base_inputs, 'target', batched_targets)
 
 
 def forward_convert_embedding(face_embedding : Embedding) -> Embedding:

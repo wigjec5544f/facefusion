@@ -183,6 +183,18 @@ python tools/interpolate_video.py \
 Tool đọc video qua ffmpeg pipe (không extract ra disk), gọi `interpolate_pair` cho mỗi cặp frame liên tiếp, ghi thẳng ra encoder. CRF mặc định 18, codec mặc định `libx264`. Override execution provider bằng `--execution-provider cuda` (lặp lại để chain `cuda → cpu`). Lần đầu chạy sẽ download `rife_4_9.onnx` ~21 MB từ HF mirror.
 
 
+Dynamic batching (face_swapper pixel-boost)
+-------------------------------------------
+
+Khi `--face-swapper-pixel-boost` lớn hơn kích thước native của model (vd. boost 1024 với `inswapper_512_live` 512px), facefusion vốn cắt crop thành lưới 2×2 = 4 tile và gọi ONNX 4 lần liên tiếp. Sau Đợt 1.G2, các tile được stack thành batch và gửi qua **một** lần `session.run` nếu model khai báo dynamic batch axis (vd. ONNX export với `dynamic_axes={'target': {0: 'batch'}}`).
+
+- Tự động — không cần flag mới. Logic detect ở `facefusion.processors.batching.supports_dynamic_batch`.
+- Model với fixed batch=1 (đa số inswapper/simswap đang ship) sẽ **fallback** sang loop cũ → output bit-equal với trước.
+- Tăng tốc thực sự kích hoạt khi (a) bạn re-export model với dynamic batch, hoặc (b) custom model như `inswapper_512_live` có dynamic axis sẵn. CUDA/TensorRT thường lợi 2–4× so với loop, CPU/OpenVINO lợi nhỏ hơn.
+
+Helpers công khai trong `facefusion.processors.batching` (`run_with_dynamic_batch`, `stack_prepared_frames`) có thể tái sử dụng cho `face_enhancer`, `frame_enhancer`... ở các PR sau.
+
+
 Optional Python extras
 ----------------------
 
