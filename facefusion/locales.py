@@ -48,6 +48,7 @@ LOCALES : Locales =\
 		'no_source_face_detected': 'no source face detected',
 		'processor_not_loaded': 'processor {processor} could not be loaded',
 		'processor_not_implemented': 'processor {processor} not implemented correctly',
+		'frame_interpolator_no_config': 'frame_interpolator processor is registered but neither --frame-interpolator-target-fps nor --frame-interpolator-multiplier is set; nothing to interpolate',
 		'ui_layout_not_loaded': 'ui layout {ui_layout} could not be loaded',
 		'ui_layout_not_implemented': 'ui layout {ui_layout} not implemented correctly',
 		'stream_not_loaded': 'stream {stream_mode} could not be loaded',

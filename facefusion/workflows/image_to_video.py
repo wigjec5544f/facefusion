@@ -155,26 +155,64 @@ def restore_audio() -> ErrorCode:
 
 
 def interpolate_output_video() -> ErrorCode:
+	"""Run RIFE frame interpolation on the rendered video.
+
+	Two activation paths, in order of priority:
+
+	1. ``--processors frame_interpolator`` registered: the processor's
+	   ``process_video`` reads its own state (model + multiplier +
+	   target_fps) and runs interpolation. This is the documented path.
+	2. Legacy ``--frame-interpolator-target-fps`` flag without the
+	   processor: kept for backward compat — derives a multiplier from
+	   target/source fps and runs the engine directly with default model.
+
+	Either path is no-op when the configuration is missing.
+	"""
+	output_path = state_manager.get_item('output_path')
+	source_fps = state_manager.get_item('output_video_fps') or 0
+	processors = state_manager.get_item('processors') or []
+
+	if 'frame_interpolator' in processors:
+		try:
+			from facefusion.processors.modules.frame_interpolator import core as frame_interpolator_processor
+		except ImportError as exception:
+			logger.error(f'failed to import frame_interpolator processor: {exception}', __name__)
+			return 0
+
+		if not frame_interpolator_processor.is_active():
+			logger.debug(translator.get('frame_interpolator_no_config'), __name__)
+			return 0
+		if not output_path or not is_video(output_path):
+			logger.warn('frame_interpolator: output video missing; skipping interpolation', __name__)
+			return 0
+
+		multiplier = frame_interpolator_processor.resolve_multiplier(source_fps)
+		if not multiplier or multiplier < 2:
+			return 0
+
+		logger.info(f'interpolating {output_path} via frame_interpolator processor (multiplier {multiplier})', __name__)
+		stem, ext = os.path.splitext(output_path)
+		temp_path = stem + '.interp' + (ext or '.mp4')
+		rc = frame_interpolator_processor.process_video(output_path, temp_path, source_fps = source_fps)
+		return _finalize_interpolation(rc, temp_path, output_path)
+
+	# Legacy path: top-level --frame-interpolator-target-fps flag without
+	# the processor selection.
 	target_fps = state_manager.get_item('frame_interpolator_target_fps')
 	if not target_fps:
 		return 0
-
-	source_fps = state_manager.get_item('output_video_fps') or 0
 	if source_fps <= 0:
 		logger.warn('frame_interpolator_target_fps set but output_video_fps is unknown; skipping interpolation', __name__)
 		return 0
 	if target_fps <= source_fps:
 		logger.warn(f'frame_interpolator_target_fps ({target_fps}) <= output_video_fps ({source_fps}); skipping interpolation', __name__)
 		return 0
-
-	multiplier = max(2, int(round(target_fps / source_fps)))
-	output_path = state_manager.get_item('output_path')
 	if not output_path or not is_video(output_path):
 		logger.warn('frame_interpolator: output video missing; skipping interpolation', __name__)
 		return 0
 
+	multiplier = max(2, int(round(target_fps / source_fps)))
 	logger.info(f'interpolating {output_path} from {source_fps} fps to ~{source_fps * multiplier} fps (multiplier {multiplier})', __name__)
-	# Preserve the original extension so ffmpeg picks the right container.
 	stem, ext = os.path.splitext(output_path)
 	temp_path = stem + '.interp' + (ext or '.mp4')
 	rc = frame_interpolator.interpolate_video_file(
@@ -185,6 +223,10 @@ def interpolate_output_video() -> ErrorCode:
 		video_quality = state_manager.get_item('output_video_quality'),
 		video_preset = state_manager.get_item('output_video_preset')
 	)
+	return _finalize_interpolation(rc, temp_path, output_path)
+
+
+def _finalize_interpolation(rc : int, temp_path : str, output_path : str) -> ErrorCode:
 	if rc != 0:
 		logger.error(f'frame interpolation failed (code {rc}); leaving original output untouched', __name__)
 		try:
