@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 from functools import lru_cache
+from typing import List
 
 import cv2
 import numpy
@@ -11,6 +12,7 @@ from facefusion.common_helper import create_int_metavar, is_macos
 from facefusion.download import conditional_download_hashes, conditional_download_sources, resolve_download_url
 from facefusion.execution import has_execution_provider
 from facefusion.filesystem import in_directory, is_image, is_video, resolve_relative_path, same_file_extension
+from facefusion.processors.batching import run_with_dynamic_batch, stack_prepared_frames
 from facefusion.processors.modules.frame_enhancer import choices as frame_enhancer_choices
 from facefusion.processors.modules.frame_enhancer.types import FrameEnhancerInputs
 from facefusion.processors.types import ProcessorOutputs
@@ -619,10 +621,13 @@ def enhance_frame(temp_vision_frame : VisionFrame) -> VisionFrame:
 	temp_height, temp_width = temp_vision_frame.shape[:2]
 	tile_vision_frames, pad_width, pad_height = create_tile_frames(temp_vision_frame, model_size)
 
-	for index, tile_vision_frame in enumerate(tile_vision_frames):
-		tile_vision_frame = prepare_tile_frame(tile_vision_frame)
-		tile_vision_frame = forward(tile_vision_frame)
-		tile_vision_frames[index] = normalize_tile_frame(tile_vision_frame)
+	prepared_tile_frames = [ prepare_tile_frame(tile_vision_frame) for tile_vision_frame in tile_vision_frames ]
+	enhanced_batch = forward_batch(prepared_tile_frames)
+	for index in range(enhanced_batch.shape[0]):
+		# Re-attach the leading batch axis dropped by `run_with_dynamic_batch`'s
+		# stack so `normalize_tile_frame`'s (1, C, H, W) -> (H, W, 3) transpose
+		# still works unchanged.
+		tile_vision_frames[index] = normalize_tile_frame(enhanced_batch[index : index + 1])
 
 	merge_vision_frame = merge_tile_frames(tile_vision_frames, temp_width * model_scale, temp_height * model_scale, pad_width * model_scale, pad_height * model_scale, (model_size[0] * model_scale, model_size[1] * model_scale, model_size[2] * model_scale))
 	temp_vision_frame = blend_merge_frame(temp_vision_frame, merge_vision_frame)
@@ -639,6 +644,22 @@ def forward(tile_vision_frame : VisionFrame) -> VisionFrame:
 		})[0]
 
 	return tile_vision_frame
+
+
+def forward_batch(prepared_tile_frames : List[VisionFrame]) -> numpy.ndarray:
+	"""Run the frame-enhancer model once for an entire tile batch.
+
+	When the underlying ONNX session declares a dynamic batch axis on its
+	'input', all tiles go through a single ``session.run``; otherwise we
+	transparently fall back to N sequential calls so observable behaviour is
+	identical to the original per-tile loop. Returns a (N, C, H, W) array;
+	the caller is responsible for splitting and normalising each tile.
+	"""
+	frame_enhancer = get_inference_pool().get('frame_enhancer')
+	batched_inputs = stack_prepared_frames(prepared_tile_frames)
+
+	with conditional_thread_semaphore():
+		return run_with_dynamic_batch(frame_enhancer, {}, 'input', batched_inputs)
 
 
 def prepare_tile_frame(tile_vision_frame : VisionFrame) -> VisionFrame:

@@ -202,6 +202,14 @@ Khi `--face-swapper-pixel-boost` lớn hơn kích thước native của model (v
 
 Helpers công khai trong `facefusion.processors.batching` (`run_with_dynamic_batch`, `stack_prepared_frames`) có thể tái sử dụng cho `face_enhancer`, `frame_enhancer`... ở các PR sau.
 
+Mở rộng Đợt 1.G2 — `frame_enhancer` tile loop:
+
+- `enhance_frame()` chia khung hình thành lưới tile (size phụ thuộc model: thường 8 hoặc 16 tile mỗi frame), trước đây mỗi tile chạy một `session.run`. Sau bản mở rộng này, tất cả tile được stack rồi gọi ONNX **một** lần qua `forward_batch`.
+- Cùng cơ chế phát hiện dynamic batch axis. Model fixed batch=1 fallback sang loop cũ → output bit-equal.
+- Với `clear_reality_x4` / `real_esrgan_x4_plus` re-export dynamic, CUDA/TensorRT có thể giảm ~30–60% wall-time/frame ở chế độ `--frame-enhancer` (số tile càng nhiều, lợi càng lớn).
+
+`face_enhancer` không có vòng lặp tile tương đương (mỗi face 1 ONNX call, không pixel-boost), nên không có cơ hội batching trong-khung-hình bit-equal. Tuỳ chọn batching qua nhiều mặt cùng frame là một quyết định ngữ nghĩa (paste-back tuần tự) và sẽ được xem xét ở PR tách riêng nếu thật sự cần.
+
 
 Optional Python extras
 ----------------------
