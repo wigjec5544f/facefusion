@@ -220,7 +220,13 @@ Mở rộng Đợt 1.G2 — `frame_enhancer` tile loop:
 - Cùng cơ chế phát hiện dynamic batch axis. Model fixed batch=1 fallback sang loop cũ → output bit-equal.
 - Với `clear_reality_x4` / `real_esrgan_x4_plus` re-export dynamic, CUDA/TensorRT có thể giảm ~30–60% wall-time/frame ở chế độ `--frame-enhancer` (số tile càng nhiều, lợi càng lớn).
 
-`face_enhancer` không có vòng lặp tile tương đương (mỗi face 1 ONNX call, không pixel-boost), nên không có cơ hội batching trong-khung-hình bit-equal. Tuỳ chọn batching qua nhiều mặt cùng frame là một quyết định ngữ nghĩa (paste-back tuần tự) và sẽ được xem xét ở PR tách riêng nếu thật sự cần.
+Mở rộng Đợt 1.G2 — `face_enhancer` multi-face:
+
+- `face_enhancer.enhance_face` không có vòng tile (mỗi face 1 ONNX call), nhưng khi một frame có nhiều mặt facefusion vốn gọi ONNX **N** lần liên tiếp.
+- `enhance_faces(target_faces, temp_vision_frame)` mới sẽ check trước cặp bbox: **không chồng** (với 25% margin để bao trọn vùng warp template) → warp + prepare cho cả N mặt rồi `forward_batch` 1 lần ONNX, paste-back tuần tự. Khi không chồng, output **bit-equal** với loop cũ vì paste-back của mặt N không ảnh hưởng warp của mặt M.
+- Có chồng → fallback nguyên loop tuần tự `enhance_face` (giữ nguyên ngữ nghĩa khi 2 mặt che nhau).
+- Hỗ trợ model có 'weight' input (codeformer): weight được pass dạng base_inputs, onnxruntime broadcast theo batch axis. Nếu runtime từ chối → fallback loop bit-equal.
+- Tự động — không cần flag mới. Tăng tốc kích hoạt rõ nhất với video nhiều mặt + model dynamic batch (vd. user re-export `gpen_bfr_2048` với `dynamic_axes={'input': {0:'batch'}}`).
 
 
 Optional Python extras

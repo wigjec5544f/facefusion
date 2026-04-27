@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 from functools import lru_cache
+from typing import List, Tuple
 
 import numpy
 
@@ -13,12 +14,13 @@ from facefusion.face_helper import paste_back, warp_face_by_face_landmark_5
 from facefusion.face_masker import create_box_mask, create_occlusion_mask
 from facefusion.face_selector import select_faces
 from facefusion.filesystem import in_directory, is_image, is_video, resolve_relative_path, same_file_extension
+from facefusion.processors.batching import run_with_dynamic_batch, stack_prepared_frames
 from facefusion.processors.modules.face_enhancer import choices as face_enhancer_choices
 from facefusion.processors.modules.face_enhancer.types import FaceEnhancerInputs, FaceEnhancerWeight
 from facefusion.processors.types import ProcessorOutputs
 from facefusion.program_helper import find_argument_group
 from facefusion.thread_helper import thread_semaphore
-from facefusion.types import ApplyStateItem, Args, DownloadScope, Face, InferencePool, ModelOptions, ModelSet, ProcessMode, VisionFrame
+from facefusion.types import ApplyStateItem, Args, BoundingBox, DownloadScope, Face, InferencePool, ModelOptions, ModelSet, ProcessMode, VisionFrame
 from facefusion.vision import blend_frame, read_static_image, read_static_video_frame
 
 
@@ -340,26 +342,47 @@ def post_process() -> None:
 
 
 def enhance_face(target_face : Face, temp_vision_frame : VisionFrame) -> VisionFrame:
-	model_template = get_model_options().get('template')
-	model_size = get_model_options().get('size')
-	crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), model_template, model_size)
-	box_mask = create_box_mask(crop_vision_frame, state_manager.get_item('face_mask_blur'), (0, 0, 0, 0))
-	crop_masks =\
-	[
-		box_mask
-	]
+	prepared_crop, affine_matrix, crop_masks = _warp_and_mask_face(target_face, temp_vision_frame)
+	face_enhancer_weight = _build_face_enhancer_weight()
+	crop_vision_frame = forward(prepared_crop, face_enhancer_weight)
+	return _paste_and_blend_face(temp_vision_frame, crop_vision_frame, affine_matrix, crop_masks)
 
-	if 'occlusion' in state_manager.get_item('face_mask_types'):
-		occlusion_mask = create_occlusion_mask(crop_vision_frame)
-		crop_masks.append(occlusion_mask)
 
-	crop_vision_frame = prepare_crop_frame(crop_vision_frame)
-	face_enhancer_weight = numpy.array([ state_manager.get_item('face_enhancer_weight') ]).astype(numpy.double)
-	crop_vision_frame = forward(crop_vision_frame, face_enhancer_weight)
-	crop_vision_frame = normalize_crop_frame(crop_vision_frame)
-	crop_mask = numpy.minimum.reduce(crop_masks).clip(0, 1)
-	paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
-	temp_vision_frame = blend_paste_frame(temp_vision_frame, paste_vision_frame)
+def enhance_faces(target_faces : List[Face], temp_vision_frame : VisionFrame) -> VisionFrame:
+	"""Enhance every face in ``target_faces`` against the same source frame.
+
+	When the faces' bounding boxes don't intersect, all crops are sent through
+	the model in a single batched ``session.run`` call (and pasted back
+	sequentially). This is **bit-equal** to the per-face loop because no
+	face's paste-back affects another face's warp region.
+
+	If any pair of bounding boxes intersect, batching could change observable
+	output (the second face's warp would sample pixels modified by the first
+	face's paste-back), so we transparently fall back to the original
+	per-face loop -- still bit-equal.
+	"""
+	if not target_faces:
+		return temp_vision_frame
+	if len(target_faces) == 1 or _faces_overlap([ face.bounding_box for face in target_faces ]):
+		for target_face in target_faces:
+			temp_vision_frame = enhance_face(target_face, temp_vision_frame)
+		return temp_vision_frame
+
+	prepared_crops : List[VisionFrame] = []
+	contexts : List[Tuple[numpy.ndarray, List[numpy.ndarray]]] = []
+	for target_face in target_faces:
+		prepared_crop, affine_matrix, crop_masks = _warp_and_mask_face(target_face, temp_vision_frame)
+		prepared_crops.append(prepared_crop)
+		contexts.append((affine_matrix, crop_masks))
+
+	face_enhancer_weight = _build_face_enhancer_weight()
+	enhanced_batch = forward_batch(prepared_crops, face_enhancer_weight)
+
+	for index, (affine_matrix, crop_masks) in enumerate(contexts):
+		# Re-attach the leading batch axis so `normalize_crop_frame` (which
+		# does `crop_vision_frame[0]` implicitly via numpy slicing) keeps
+		# working unchanged even if a future refactor expects (1, C, H, W).
+		temp_vision_frame = _paste_and_blend_face(temp_vision_frame, enhanced_batch[index], affine_matrix, crop_masks)
 	return temp_vision_frame
 
 
@@ -377,6 +400,78 @@ def forward(crop_vision_frame : VisionFrame, face_enhancer_weight : FaceEnhancer
 		crop_vision_frame = face_enhancer.run(None, face_enhancer_inputs)[0][0]
 
 	return crop_vision_frame
+
+
+def forward_batch(prepared_crops : List[VisionFrame], face_enhancer_weight : FaceEnhancerWeight) -> numpy.ndarray:
+	"""Run the face-enhancer model once for an entire batch of pre-processed
+	face crops. ``prepared_crops`` is a list of (1, C, H, W) arrays produced
+	by ``prepare_crop_frame``. The optional ``weight`` input -- present on
+	models such as codeformer -- is supplied as a constant base input;
+	onnxruntime broadcasts a (1,) weight across the batch axis. If the
+	runtime rejects the batched call (or the model declares fixed batch=1)
+	the helper falls back to per-element session.run calls so observable
+	behaviour matches the original loop bit-for-bit.
+	"""
+	face_enhancer = get_inference_pool().get('face_enhancer')
+	batched_crops = stack_prepared_frames(prepared_crops)
+	base_inputs : dict = {}
+	for face_enhancer_input in face_enhancer.get_inputs():
+		if face_enhancer_input.name == 'weight':
+			base_inputs['weight'] = face_enhancer_weight
+
+	with thread_semaphore():
+		return run_with_dynamic_batch(face_enhancer, base_inputs, 'input', batched_crops)
+
+
+def _build_face_enhancer_weight() -> FaceEnhancerWeight:
+	return numpy.array([ state_manager.get_item('face_enhancer_weight') ]).astype(numpy.double)
+
+
+def _warp_and_mask_face(target_face : Face, temp_vision_frame : VisionFrame) -> Tuple[VisionFrame, numpy.ndarray, List[numpy.ndarray]]:
+	model_template = get_model_options().get('template')
+	model_size = get_model_options().get('size')
+	crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), model_template, model_size)
+	box_mask = create_box_mask(crop_vision_frame, state_manager.get_item('face_mask_blur'), (0, 0, 0, 0))
+	crop_masks = [ box_mask ]
+	if 'occlusion' in state_manager.get_item('face_mask_types'):
+		crop_masks.append(create_occlusion_mask(crop_vision_frame))
+	prepared_crop = prepare_crop_frame(crop_vision_frame)
+	return prepared_crop, affine_matrix, crop_masks
+
+
+def _paste_and_blend_face(temp_vision_frame : VisionFrame, crop_vision_frame : VisionFrame, affine_matrix : numpy.ndarray, crop_masks : List[numpy.ndarray]) -> VisionFrame:
+	crop_vision_frame = normalize_crop_frame(crop_vision_frame)
+	crop_mask = numpy.minimum.reduce(crop_masks).clip(0, 1)
+	paste_vision_frame = paste_back(temp_vision_frame, crop_vision_frame, crop_mask, affine_matrix)
+	return blend_paste_frame(temp_vision_frame, paste_vision_frame)
+
+
+def _faces_overlap(bounding_boxes : List[BoundingBox]) -> bool:
+	"""Return True if any pair of bounding boxes intersect.
+
+	Each bounding box is in ``[x1, y1, x2, y2]`` form (the format produced by
+	the face_detector pipeline). A small expansion is applied so that the
+	check stays conservative against the wider warp region used by
+	``warp_face_by_face_landmark_5`` -- if in doubt, fall back to the
+	sequential loop, which is always bit-equal.
+	"""
+	expansion = 0.25
+	expanded : List[Tuple[float, float, float, float]] = []
+	for box in bounding_boxes:
+		left, top, right, bottom = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+		width = right - left
+		height = bottom - top
+		dx = width * expansion
+		dy = height * expansion
+		expanded.append((left - dx, top - dy, right + dx, bottom + dy))
+
+	for index in range(len(expanded)):
+		left_i, top_i, right_i, bottom_i = expanded[index]
+		for other_index in range(index + 1, len(expanded)):
+			left_j, top_j, right_j, bottom_j = expanded[other_index]
+			if left_i < right_j and left_j < right_i and top_i < bottom_j and top_j < bottom_i:
+				return True
+	return False
 
 
 def has_weight_input() -> bool:
@@ -419,8 +514,7 @@ def process_frame(inputs : FaceEnhancerInputs) -> ProcessorOutputs:
 	target_faces = select_faces(reference_vision_frame, target_vision_frame)
 
 	if target_faces:
-		for target_face in target_faces:
-			target_face = scale_face(target_face, target_vision_frame, temp_vision_frame)
-			temp_vision_frame = enhance_face(target_face, temp_vision_frame)
+		scaled_faces = [ scale_face(target_face, target_vision_frame, temp_vision_frame) for target_face in target_faces ]
+		temp_vision_frame = enhance_faces(scaled_faces, temp_vision_frame)
 
 	return temp_vision_frame, temp_vision_mask
