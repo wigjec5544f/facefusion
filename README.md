@@ -162,14 +162,22 @@ mid_frame = frame_interpolator.interpolate_pair(prev_frame, next_frame, timestep
 
 Đầu vào / đầu ra là `VisionFrame` (HxWx3 BGR uint8) — cùng format với phần còn lại của facefusion. Module tự download `rife_4_9.onnx` (21 MB) lần đầu chạy từ HF mirror (`ngoqquyen/facefusion-extras` mặc định, override bằng `FACEFUSION_HF_NAMESPACE` + `FACEFUSION_EXTRAS_REPO`).
 
-Pipeline integration đã ship — thêm cờ `--frame-interpolator-target-fps 60` vào lệnh `headless-run` thì RIFE sẽ tự chạy ở cuối pipeline (sau `restore_audio`) và overwrite output. Multiplier được chọn = `round(target_fps / output_video_fps)` (tối thiểu 2). Khi `target_fps ≤ output_video_fps` thì bỏ qua. Nếu interpolation lỗi, output gốc giữ nguyên (rc=0, log warning).
+Pipeline integration đã ship — có **hai cách** kích hoạt, kết quả như nhau:
+
+**1. Cách mới (Đợt 1.E, khuyến nghị):** thêm `frame_interpolator` vào `--processors`, kèm các tham số riêng:
 
 ```
 python facefusion.py headless-run \
   --source-paths face.png --target-path video.mp4 --output-path out.mp4 \
-  --processors face_swapper face_enhancer \
+  --processors face_swapper face_enhancer frame_interpolator \
   --frame-interpolator-target-fps 60
 ```
+
+Cách này tự động đăng ký processor vào registry, tích hợp với `pre_check`/`post_process` (download model, dọn inference pool theo `--video-memory-strategy`), hỗ trợ chọn model qua `--frame-interpolator-model rife_4_9` và override multiplier rời rạc qua `--frame-interpolator-multiplier 3` (vd: 24fps → 72fps thay vì để RIFE tự ước lượng từ target fps).
+
+**2. Cách cũ (backward-compat):** chỉ dùng cờ `--frame-interpolator-target-fps 60` mà không thêm `frame_interpolator` vào `--processors`. Workflow vẫn nhận diện và chạy với model mặc định (`rife_4_9`), giữ tương thích các script đã viết trước Đợt 1.E.
+
+Cả hai cách: RIFE chạy ở cuối pipeline (sau `restore_audio`), multiplier chọn = `round(target_fps / output_video_fps)` (tối thiểu 2), khi `target_fps ≤ output_video_fps` thì bỏ qua, lỗi interpolation giữ nguyên output gốc (rc=0, log warning).
 
 Cho workflow độc lập (vd: chỉ tăng fps mà không swap), dùng CLI:
 
