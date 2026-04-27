@@ -85,6 +85,43 @@ def test_run_returns_nonzero_on_encoder_failure(tmp_path : pathlib.Path) -> None
 	reason = 'ffmpeg/ffprobe not on PATH')
 @pytest.mark.skipif(not os.path.isfile(pathlib.Path(__file__).resolve().parent.parent / '.assets' / 'models' / 'rife_4_9.onnx'),
 	reason = 'rife_4_9.onnx not downloaded')
+def test_audio_track_preserved(tmp_path : pathlib.Path) -> None:
+	"""Regression: interpolated output must keep the audio track from the input."""
+	source_path = tmp_path / 'src.mp4'
+	dest_path = tmp_path / 'dst.mp4'
+	# Generate a 1-second clip with both video (testsrc) and audio (sine wave 440 Hz).
+	subprocess.run(
+		[
+			'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+			'-f', 'lavfi', '-i', 'testsrc=duration=1:size=32x32:rate=10',
+			'-f', 'lavfi', '-i', 'sine=frequency=440:duration=1',
+			'-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+			'-c:a', 'aac', '-shortest',
+			str(source_path)
+		],
+		check = True
+	)
+	rc = interpolate_video.run(source_path, dest_path, multiplier = 2, codec = 'libx264', crf = 23, execution_providers = [ 'cpu' ])
+	assert rc == 0
+	# Probe output streams; audio stream must be present.
+	probe = subprocess.run(
+		[
+			'ffprobe', '-v', 'error',
+			'-show_entries', 'stream=codec_type', '-of', 'json',
+			str(dest_path)
+		],
+		capture_output = True, text = True, check = True
+	)
+	import json
+	codec_types = [ stream['codec_type'] for stream in json.loads(probe.stdout)['streams'] ]
+	assert 'video' in codec_types
+	assert 'audio' in codec_types, f'audio track was dropped during interpolation; streams: {codec_types}'
+
+
+@pytest.mark.skipif(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
+	reason = 'ffmpeg/ffprobe not on PATH')
+@pytest.mark.skipif(not os.path.isfile(pathlib.Path(__file__).resolve().parent.parent / '.assets' / 'models' / 'rife_4_9.onnx'),
+	reason = 'rife_4_9.onnx not downloaded')
 def test_run_end_to_end(tmp_path : pathlib.Path) -> None:
 	source_path = tmp_path / 'src.mp4'
 	dest_path = tmp_path / 'dst.mp4'

@@ -179,7 +179,7 @@ def _iter_source_frames(input_path : str, width : int, height : int) -> Iterator
 		process.wait()
 
 
-def _open_writer(output_path : str, width : int, height : int, target_fps : float, codec : str, crf : int) -> 'subprocess.Popen[bytes]':
+def _open_writer(output_path : str, width : int, height : int, target_fps : float, codec : str, crf : int, audio_source_path : Optional[str] = None) -> 'subprocess.Popen[bytes]':
 	cmd =\
 	[
 		'ffmpeg',
@@ -188,7 +188,14 @@ def _open_writer(output_path : str, width : int, height : int, target_fps : floa
 		'-s', '{0}x{1}'.format(width, height),
 		'-pix_fmt', 'bgr24',
 		'-r', str(target_fps),
-		'-i', 'pipe:0',
+		'-i', 'pipe:0'
+	]
+	if audio_source_path:
+		# Mux audio from the original input alongside the new interpolated video.
+		# `-map 1:a?` makes the audio mapping optional so silent inputs still encode.
+		cmd += [ '-i', audio_source_path, '-map', '0:v', '-map', '1:a?', '-c:a', 'copy' ]
+	cmd +=\
+	[
 		'-c:v', codec,
 		'-crf', str(crf),
 		'-pix_fmt', 'yuv420p',
@@ -223,9 +230,15 @@ def interpolate_video_file(
 	multiplier : int,
 	codec : str = 'libx264',
 	crf : int = 18,
-	model_name : Optional[str] = None
+	model_name : Optional[str] = None,
+	preserve_audio : bool = True
 ) -> int:
 	"""Run RIFE interpolation on a video, writing to `output_path`.
+
+	When ``preserve_audio`` is True (default), the audio track from
+	``input_path`` is muxed into ``output_path`` via a second ffmpeg input
+	(`-map 0:v -map 1:a? -c:a copy`). Set False if the source has no audio
+	or you intentionally want a silent output.
 
 	Returns 0 on success, non-zero on failure (mirrors CLI exit codes):
 	* 2 — invalid args (multiplier < 2, missing input)
@@ -242,7 +255,8 @@ def interpolate_video_file(
 	width, height, source_fps = _probe_video(input_path)
 	target_fps = source_fps * multiplier
 
-	writer = _open_writer(output_path, width, height, target_fps, codec, crf)
+	audio_source_path = input_path if preserve_audio else None
+	writer = _open_writer(output_path, width, height, target_fps, codec, crf, audio_source_path)
 	encoder_died = False
 	prev_frame : Optional[numpy.ndarray] = None
 	try:
