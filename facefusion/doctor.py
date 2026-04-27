@@ -7,17 +7,17 @@ from typing import List, Optional, Tuple
 
 import onnxruntime
 
-from facefusion import cli_helper, logger, metadata, state_manager, translator
+from facefusion import cli_helper, hash_helper, logger, metadata, state_manager, translator
 from facefusion.execution import get_available_execution_providers
-from facefusion.filesystem import is_directory
+from facefusion.filesystem import is_directory, is_file, resolve_relative_path
 
 
-def render() -> int:
+def render(verify_models : bool = False) -> int:
 	headers = [ 'check', 'status', 'detail' ]
 	rows : List[List[str]] = []
 	exit_code = 0
 
-	for label, status, detail in run_checks():
+	for label, status, detail in run_checks(verify_models = verify_models):
 		rows.append([ label, status, detail ])
 		if status == 'fail':
 			exit_code = 1
@@ -32,7 +32,7 @@ def render() -> int:
 	return exit_code
 
 
-def run_checks() -> List[Tuple[str, str, str]]:
+def run_checks(verify_models : bool = False) -> List[Tuple[str, str, str]]:
 	checks : List[Tuple[str, str, str]] = []
 	checks.append(check_python())
 	checks.append(check_platform())
@@ -40,10 +40,12 @@ def run_checks() -> List[Tuple[str, str, str]]:
 	checks.append(check_ffmpeg())
 	checks.append(check_onnxruntime())
 	checks.extend(check_execution_providers())
+	checks.extend(check_gpu())
 	checks.append(check_temp_path())
 	checks.append(check_jobs_path())
 	checks.append(check_disk_space())
 	checks.append(check_system_memory())
+	checks.extend(check_models(verify = verify_models))
 	return checks
 
 
@@ -188,3 +190,160 @@ def read_total_memory() -> Optional[int]:
 			if value.isdigit():
 				return int(value)
 	return None
+
+
+def check_gpu() -> List[Tuple[str, str, str]]:
+	"""Probe NVIDIA / AMD / Apple GPUs and report name + VRAM if available.
+
+	The check is best-effort: missing tools (nvidia-smi / rocm-smi /
+	system_profiler) result in a `warn` row, never `fail`, because a
+	CPU-only environment is a perfectly legitimate setup for facefusion.
+	"""
+	rows : List[Tuple[str, str, str]] = []
+	rows.extend(_probe_nvidia_gpus())
+	rows.extend(_probe_amd_gpus())
+	rows.extend(_probe_apple_gpus())
+
+	if not rows:
+		rows.append(('gpu', 'warn', 'no nvidia-smi / rocm-smi / Apple Silicon detected'))
+	return rows
+
+
+def _probe_nvidia_gpus() -> List[Tuple[str, str, str]]:
+	binary = shutil.which('nvidia-smi')
+
+	if not binary:
+		return []
+	try:
+		process = subprocess.run(
+			[ binary, '--query-gpu=name,memory.total,driver_version', '--format=csv,noheader,nounits' ],
+			capture_output = True,
+			text = True,
+			timeout = 10
+		)
+	except (OSError, subprocess.SubprocessError):
+		return [ ('gpu_nvidia', 'warn', 'nvidia-smi present but failed to query') ]
+
+	if process.returncode != 0 or not process.stdout.strip():
+		return [ ('gpu_nvidia', 'warn', 'nvidia-smi returned no devices') ]
+
+	rows : List[Tuple[str, str, str]] = []
+	for index, line in enumerate(process.stdout.strip().splitlines()):
+		parts = [ part.strip() for part in line.split(',') ]
+		if len(parts) < 3:
+			continue
+		name, vram_mib, driver_version = parts[0], parts[1], parts[2]
+		try:
+			vram_gib = float(vram_mib) / 1024
+		except ValueError:
+			vram_gib = 0.0
+		rows.append((
+			'gpu_nvidia[{}]'.format(index),
+			'ok',
+			'{} ({:.1f} GiB VRAM, driver {})'.format(name, vram_gib, driver_version)
+		))
+	return rows
+
+
+def _probe_amd_gpus() -> List[Tuple[str, str, str]]:
+	binary = shutil.which('rocm-smi')
+
+	if not binary:
+		return []
+	try:
+		process = subprocess.run([ binary, '--showproductname', '--showmeminfo', 'vram' ], capture_output = True, text = True, timeout = 10)
+	except (OSError, subprocess.SubprocessError):
+		return [ ('gpu_amd', 'warn', 'rocm-smi present but failed to query') ]
+
+	if process.returncode != 0 or not process.stdout.strip():
+		return [ ('gpu_amd', 'warn', 'rocm-smi returned no devices') ]
+	# rocm-smi output is dense; just surface the first relevant line so the
+	# user knows ROCm is wired up. Detailed parsing is out of scope.
+	first_line = next((line.strip() for line in process.stdout.splitlines() if line.strip()), '')
+	return [ ('gpu_amd', 'ok', first_line[:120] or 'detected') ]
+
+
+def _probe_apple_gpus() -> List[Tuple[str, str, str]]:
+	if platform.system() != 'Darwin':
+		return []
+	binary = shutil.which('system_profiler')
+
+	if not binary:
+		return []
+	try:
+		process = subprocess.run([ binary, 'SPDisplaysDataType' ], capture_output = True, text = True, timeout = 10)
+	except (OSError, subprocess.SubprocessError):
+		return [ ('gpu_apple', 'warn', 'system_profiler failed') ]
+
+	if process.returncode != 0:
+		return []
+	for line in process.stdout.splitlines():
+		stripped = line.strip()
+		if stripped.startswith('Chipset Model:'):
+			return [ ('gpu_apple', 'ok', stripped.split(':', 1)[1].strip()) ]
+	return []
+
+
+def get_models_directory() -> str:
+	return resolve_relative_path('../.assets/models')
+
+
+def check_models(verify : bool = False) -> List[Tuple[str, str, str]]:
+	"""Inventory the local model cache and -- when ``verify=True`` -- check
+	each ONNX file's CRC32 against its sibling `.hash` file.
+
+	`verify=True` is opt-in because hashing every model on disk can take a
+	few seconds and isn't necessary for routine `doctor` runs.
+	"""
+	models_directory = get_models_directory()
+
+	if not is_directory(models_directory):
+		return [ ('models', 'warn', '{} does not exist (run install.bat / install.py first)'.format(models_directory)) ]
+
+	onnx_files = [ entry for entry in os.listdir(models_directory) if entry.endswith('.onnx') ]
+	hash_files = [ entry for entry in os.listdir(models_directory) if entry.endswith('.hash') ]
+
+	if not onnx_files:
+		return [ ('models', 'warn', 'no .onnx files found at {}'.format(models_directory)) ]
+
+	total_bytes = 0
+	for onnx_file in onnx_files:
+		try:
+			total_bytes += os.path.getsize(os.path.join(models_directory, onnx_file))
+		except OSError:
+			continue
+
+	rows : List[Tuple[str, str, str]] = [
+		('models', 'ok', '{} models, {:.1f} GiB at {}'.format(len(onnx_files), total_bytes / (1024 ** 3), models_directory))
+	]
+
+	orphan_hashes = [ entry for entry in hash_files if entry[:-5] + '.onnx' not in onnx_files ]
+	if orphan_hashes:
+		rows.append(('models_orphan_hashes', 'warn', '{} orphan .hash without .onnx (e.g. {})'.format(len(orphan_hashes), ', '.join(orphan_hashes[:3]))))
+
+	if verify:
+		rows.extend(_verify_model_hashes(models_directory, onnx_files))
+	return rows
+
+
+def _verify_model_hashes(models_directory : str, onnx_files : List[str]) -> List[Tuple[str, str, str]]:
+	mismatches : List[str] = []
+	missing : List[str] = []
+	for onnx_file in onnx_files:
+		onnx_path = os.path.join(models_directory, onnx_file)
+		hash_path = onnx_path.rsplit('.onnx', 1)[0] + '.hash'
+
+		if not is_file(hash_path):
+			missing.append(onnx_file)
+			continue
+		if not hash_helper.validate_hash(onnx_path):
+			mismatches.append(onnx_file)
+
+	rows : List[Tuple[str, str, str]] = []
+	if missing:
+		rows.append(('models_hash_missing', 'warn', '{} model(s) without .hash sidecar (e.g. {})'.format(len(missing), ', '.join(missing[:3]))))
+	if mismatches:
+		rows.append(('models_hash_mismatch', 'fail', '{} model(s) failed CRC32 (e.g. {}) -- re-download'.format(len(mismatches), ', '.join(mismatches[:3]))))
+	if not missing and not mismatches:
+		rows.append(('models_hash_verified', 'ok', '{} model(s) match their .hash sidecar'.format(len(onnx_files))))
+	return rows

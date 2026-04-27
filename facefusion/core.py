@@ -51,7 +51,7 @@ def route(args : Args) -> None:
 		hard_exit(error_code)
 
 	if state_manager.get_item('command') == 'doctor':
-		error_code = doctor.render()
+		error_code = doctor.render(verify_models = bool(args.get('verify_models', False)))
 		hard_exit(error_code)
 
 	if state_manager.get_item('command') == 'benchmark':
