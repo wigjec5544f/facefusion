@@ -179,7 +179,7 @@ def _iter_source_frames(input_path : str, width : int, height : int) -> Iterator
 		process.wait()
 
 
-def _open_writer(output_path : str, width : int, height : int, target_fps : float, codec : str, crf : int, audio_source_path : Optional[str] = None) -> 'subprocess.Popen[bytes]':
+def _open_writer(output_path : str, width : int, height : int, target_fps : float, encoder_args : List[str], audio_source_path : Optional[str] = None) -> 'subprocess.Popen[bytes]':
 	cmd =\
 	[
 		'ffmpeg',
@@ -194,14 +194,28 @@ def _open_writer(output_path : str, width : int, height : int, target_fps : floa
 		# Mux audio from the original input alongside the new interpolated video.
 		# `-map 1:a?` makes the audio mapping optional so silent inputs still encode.
 		cmd += [ '-i', audio_source_path, '-map', '0:v', '-map', '1:a?', '-c:a', 'copy' ]
-	cmd +=\
-	[
-		'-c:v', codec,
-		'-crf', str(crf),
-		'-pix_fmt', 'yuv420p',
-		output_path
-	]
+	cmd += list(encoder_args)
+	cmd += [ '-pix_fmt', 'yuv420p', output_path ]
 	return subprocess.Popen(cmd, stdin = subprocess.PIPE)
+
+
+def _build_encoder_args(video_encoder : str, video_quality : Optional[int], video_preset : Optional[str], crf_fallback : int) -> List[str]:
+	"""Build ffmpeg `-c:v ... -crf/-cq/...` args mirroring `ffmpeg_builder` so
+	the encoder/quality/preset configured by the user via facefusion CLI flags
+	is honored when the workflow's `interpolate_output_video` step re-encodes."""
+	from facefusion import ffmpeg_builder  # local import to avoid circular deps at module load
+	args : List[str] = list(ffmpeg_builder.set_video_encoder(video_encoder))
+	if video_quality is not None:
+		quality_args = ffmpeg_builder.set_video_quality(video_encoder, int(video_quality))
+		if quality_args:
+			args += list(quality_args)
+		else:
+			args += [ '-crf', str(crf_fallback) ]
+	else:
+		args += [ '-crf', str(crf_fallback) ]
+	if video_preset:
+		args += list(ffmpeg_builder.set_video_preset(video_encoder, video_preset))
+	return args
 
 
 def _safe_write(process : 'subprocess.Popen[bytes]', payload : bytes) -> bool:
@@ -231,7 +245,10 @@ def interpolate_video_file(
 	codec : str = 'libx264',
 	crf : int = 18,
 	model_name : Optional[str] = None,
-	preserve_audio : bool = True
+	preserve_audio : bool = True,
+	video_encoder : Optional[str] = None,
+	video_quality : Optional[int] = None,
+	video_preset : Optional[str] = None
 ) -> int:
 	"""Run RIFE interpolation on a video, writing to `output_path`.
 
@@ -239,6 +256,13 @@ def interpolate_video_file(
 	``input_path`` is muxed into ``output_path`` via a second ffmpeg input
 	(`-map 0:v -map 1:a? -c:a copy`). Set False if the source has no audio
 	or you intentionally want a silent output.
+
+	Encoder selection:
+	* If ``video_encoder`` is provided (workflow path), encoder + quality
+	  (0-100 facefusion scale) + preset are translated to ffmpeg flags via
+	  ``facefusion.ffmpeg_builder`` so the same settings the rest of the
+	  pipeline uses are honored on the re-encoded output.
+	* Otherwise (CLI path) the legacy ``codec`` / ``crf`` arguments are used.
 
 	Returns 0 on success, non-zero on failure (mirrors CLI exit codes):
 	* 2 — invalid args (multiplier < 2, missing input)
@@ -256,7 +280,11 @@ def interpolate_video_file(
 	target_fps = source_fps * multiplier
 
 	audio_source_path = input_path if preserve_audio else None
-	writer = _open_writer(output_path, width, height, target_fps, codec, crf, audio_source_path)
+	if video_encoder:
+		encoder_args = _build_encoder_args(video_encoder, video_quality, video_preset, crf)
+	else:
+		encoder_args = [ '-c:v', codec, '-crf', str(crf) ]
+	writer = _open_writer(output_path, width, height, target_fps, encoder_args, audio_source_path)
 	encoder_died = False
 	prev_frame : Optional[numpy.ndarray] = None
 	try:

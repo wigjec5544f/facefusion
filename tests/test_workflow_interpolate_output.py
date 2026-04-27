@@ -63,12 +63,15 @@ def test_runs_interpolation_with_correct_multiplier(monkeypatch, tmp_path : path
 	monkeypatch.setattr(state_manager, 'get_item', lambda key: {
 		'frame_interpolator_target_fps': 60,
 		'output_video_fps': 30,
-		'output_path': str(output_path)
+		'output_path': str(output_path),
+		'output_video_encoder': 'libx264',
+		'output_video_quality': 80,
+		'output_video_preset': 'veryfast'
 	}.get(key))
 	# is_video returns True for our fake file (we patch the import in workflow module).
 	monkeypatch.setattr('facefusion.workflows.image_to_video.is_video', lambda path: True)
 
-	def fake_interpolate(input_path, output_path, multiplier, codec = 'libx264', crf = 18, model_name = None):
+	def fake_interpolate(input_path, output_path, multiplier, **kwargs):
 		# Write a marker file so os.replace sees something.
 		pathlib.Path(output_path).write_bytes(b'interpolated')
 		return 0
@@ -81,8 +84,41 @@ def test_runs_interpolation_with_correct_multiplier(monkeypatch, tmp_path : path
 	kwargs = patched.call_args.kwargs
 	assert kwargs['multiplier'] == 2
 	assert kwargs['input_path'] == str(output_path)
+	# Encoder/quality/preset must be forwarded so the user's --output-video-* flags are honored.
+	assert kwargs['video_encoder'] == 'libx264'
+	assert kwargs['video_quality'] == 80
+	assert kwargs['video_preset'] == 'veryfast'
 	# Output replaced in place.
 	assert output_path.read_bytes() == b'interpolated'
+
+
+def test_temp_path_preserves_extension(monkeypatch, tmp_path : pathlib.Path) -> None:
+	"""Regression: the temp path used during interpolation must keep the
+	original output extension so ffmpeg picks the right container."""
+	output_path = tmp_path / 'out.webm'
+	output_path.write_bytes(b'webm contents')
+	captured : dict = {}
+
+	monkeypatch.setattr(state_manager, 'get_item', lambda key: {
+		'frame_interpolator_target_fps': 60,
+		'output_video_fps': 30,
+		'output_path': str(output_path),
+		'output_video_encoder': 'libvpx-vp9',
+		'output_video_quality': 80,
+		'output_video_preset': 'veryfast'
+	}.get(key))
+	monkeypatch.setattr('facefusion.workflows.image_to_video.is_video', lambda path: True)
+
+	def fake_interpolate(input_path, output_path, multiplier, **kwargs):
+		captured['temp_path'] = output_path
+		pathlib.Path(output_path).write_bytes(b'i')
+		return 0
+
+	with mock.patch('facefusion.frame_interpolator.interpolate_video_file', side_effect = fake_interpolate), \
+			mock.patch('facefusion.video_manager.clear_video_pool'):
+		assert image_to_video.interpolate_output_video() == 0
+
+	assert captured['temp_path'].endswith('.webm'), f'expected .webm temp, got {captured["temp_path"]}'
 
 
 def test_target_fps_60_from_source_24_uses_multiplier_3(monkeypatch, tmp_path : pathlib.Path) -> None:
@@ -91,11 +127,14 @@ def test_target_fps_60_from_source_24_uses_multiplier_3(monkeypatch, tmp_path : 
 	monkeypatch.setattr(state_manager, 'get_item', lambda key: {
 		'frame_interpolator_target_fps': 60,
 		'output_video_fps': 24,
-		'output_path': str(output_path)
+		'output_path': str(output_path),
+		'output_video_encoder': 'libx264',
+		'output_video_quality': 80,
+		'output_video_preset': 'veryfast'
 	}.get(key))
 	monkeypatch.setattr('facefusion.workflows.image_to_video.is_video', lambda path: True)
 
-	def fake_interpolate(input_path, output_path, multiplier, codec = 'libx264', crf = 18, model_name = None):
+	def fake_interpolate(input_path, output_path, multiplier, **kwargs):
 		pathlib.Path(output_path).write_bytes(b'i')
 		return 0
 

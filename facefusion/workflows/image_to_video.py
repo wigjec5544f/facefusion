@@ -174,11 +174,16 @@ def interpolate_output_video() -> ErrorCode:
 		return 0
 
 	logger.info(f'interpolating {output_path} from {source_fps} fps to ~{source_fps * multiplier} fps (multiplier {multiplier})', __name__)
-	temp_path = output_path + '.interp.mp4'
+	# Preserve the original extension so ffmpeg picks the right container.
+	stem, ext = os.path.splitext(output_path)
+	temp_path = stem + '.interp' + (ext or '.mp4')
 	rc = frame_interpolator.interpolate_video_file(
 		input_path = output_path,
 		output_path = temp_path,
-		multiplier = multiplier
+		multiplier = multiplier,
+		video_encoder = state_manager.get_item('output_video_encoder'),
+		video_quality = state_manager.get_item('output_video_quality'),
+		video_preset = state_manager.get_item('output_video_preset')
 	)
 	if rc != 0:
 		logger.error(f'frame interpolation failed (code {rc}); leaving original output untouched', __name__)
