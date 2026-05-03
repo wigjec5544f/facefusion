@@ -7,7 +7,7 @@ from facefusion.common_helper import get_first
 from facefusion.face_classifier import classify_face
 from facefusion.face_detector import detect_faces, detect_faces_by_angle
 from facefusion.face_helper import apply_nms, convert_to_face_landmark_5, estimate_face_angle, get_nms_threshold
-from facefusion.face_landmarker import detect_face_landmark, estimate_face_landmark_68_5
+from facefusion.face_landmarker import detect_face_landmark, estimate_face_landmark_68_5_batch
 from facefusion.face_recognizer import calculate_face_embeddings
 from facefusion.face_store import get_static_faces, set_static_faces
 from facefusion.types import BoundingBox, Face, FaceLandmark5, FaceLandmarkSet, FaceScoreSet, Score, VisionFrame
@@ -18,18 +18,25 @@ def create_faces(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox],
 	nms_threshold = get_nms_threshold(state_manager.get_item('face_detector_model'), state_manager.get_item('face_detector_angles'))
 	keep_indices = apply_nms(bounding_boxes, face_scores, state_manager.get_item('face_detector_score'), nms_threshold)
 
+	# Phase 0 -- batch every kept face's 5->68 landmark expansion through
+	# the `fan_68_5` ONNX model in one call. With a dynamic-batch model
+	# this collapses N session.run() into 1; otherwise the helper falls
+	# back to N sequential calls (bit-equal output guaranteed).
+	kept_face_landmarks_5 = [ face_landmarks_5[index] for index in keep_indices ]
+	kept_face_landmarks_68_5 = estimate_face_landmark_68_5_batch(kept_face_landmarks_5)
+
 	# Phase 1 -- gather every kept face's per-face state (bounding box,
 	# score, refined landmarks) without touching the ArcFace ONNX model
 	# yet. This lets us run the recogniser exactly once for the whole
 	# frame in phase 2 instead of once per face.
 	face_records = []
 
-	for index in keep_indices:
+	for index_position, index in enumerate(keep_indices):
 		bounding_box = bounding_boxes[index]
 		face_score = face_scores[index]
 		face_landmark_5 = face_landmarks_5[index]
 		face_landmark_5_68 = face_landmark_5
-		face_landmark_68_5 = estimate_face_landmark_68_5(face_landmark_5_68)
+		face_landmark_68_5 = kept_face_landmarks_68_5[index_position]
 		face_landmark_68 = face_landmark_68_5
 		face_landmark_score_68 = 0.0
 		face_angle = estimate_face_angle(face_landmark_68_5)

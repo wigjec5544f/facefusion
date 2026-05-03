@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Tuple
+from typing import List, Tuple
 
 import cv2
 import numpy
@@ -8,6 +8,7 @@ from facefusion import inference_manager, state_manager
 from facefusion.download import conditional_download_hashes, conditional_download_sources, resolve_download_url
 from facefusion.face_helper import create_rotation_matrix_and_size, estimate_matrix_by_face_landmark_5, transform_points, warp_face_by_translation
 from facefusion.filesystem import resolve_relative_path
+from facefusion.processors.batching import run_with_dynamic_batch
 from facefusion.thread_helper import conditional_thread_semaphore
 from facefusion.types import Angle, BoundingBox, DownloadScope, DownloadSet, FaceLandmark5, FaceLandmark68, InferencePool, ModelSet, Prediction, Score, VisionFrame
 
@@ -197,11 +198,49 @@ def conditional_optimize_contrast(crop_vision_frame : VisionFrame) -> VisionFram
 
 
 def estimate_face_landmark_68_5(face_landmark_5 : FaceLandmark5) -> FaceLandmark68:
-	affine_matrix = estimate_matrix_by_face_landmark_5(face_landmark_5, 'ffhq_512', (1, 1))
-	face_landmark_5 = cv2.transform(face_landmark_5.reshape(1, -1, 2), affine_matrix).reshape(-1, 2)
-	face_landmark_68_5 = forward_fan_68_5(face_landmark_5)
-	face_landmark_68_5 = cv2.transform(face_landmark_68_5.reshape(1, -1, 2), cv2.invertAffineTransform(affine_matrix)).reshape(-1, 2)
+	# Single-face wrapper -- routes through the batched implementation
+	# with N=1 so both call sites share identical pre/post-processing.
+	# Output is bit-identical to the previous serial implementation.
+	[ face_landmark_68_5 ] = estimate_face_landmark_68_5_batch([ face_landmark_5 ])
 	return face_landmark_68_5
+
+
+def estimate_face_landmark_68_5_batch(face_landmarks_5 : List[FaceLandmark5]) -> List[FaceLandmark68]:
+	"""Estimate 68-point landmarks for a list of 5-point landmarks in one
+	batched ``fan_68_5`` ONNX call.
+
+	Each input landmark is first warped into the model's canonical space
+	(``ffhq_512``) using its own affine matrix; the warped 5-point arrays
+	are stacked into ``(N, 5, 2)`` and dispatched once. After the model
+	returns ``(N, 68, 2)`` we re-apply the per-face inverse affines to
+	bring each prediction back into the original pixel space.
+
+	When the loaded ONNX model declares a dynamic batch axis the entire
+	batch runs in **one** ``session.run``; otherwise we transparently
+	fall back to the same per-face loop the codebase used before
+	(bit-equal output guaranteed).
+	"""
+	if not face_landmarks_5:
+		return []
+
+	per_face_prepared : List[numpy.ndarray] = []
+	per_face_inverse_matrices : List[numpy.ndarray] = []
+
+	for face_landmark_5 in face_landmarks_5:
+		affine_matrix = estimate_matrix_by_face_landmark_5(face_landmark_5, 'ffhq_512', (1, 1))
+		warped_landmark_5 = cv2.transform(face_landmark_5.reshape(1, -1, 2), affine_matrix).reshape(-1, 2)
+		per_face_prepared.append(warped_landmark_5.astype(numpy.float32))
+		per_face_inverse_matrices.append(cv2.invertAffineTransform(affine_matrix))
+
+	batched_input = numpy.stack(per_face_prepared, axis = 0)
+	batched_predictions = forward_fan_68_5_batch(batched_input)
+
+	results : List[FaceLandmark68] = []
+	for index, inverse_matrix in enumerate(per_face_inverse_matrices):
+		face_landmark_68_5 = batched_predictions[index]
+		face_landmark_68_5 = cv2.transform(face_landmark_68_5.reshape(1, -1, 2), inverse_matrix).reshape(-1, 2)
+		results.append(face_landmark_68_5)
+	return results
 
 
 def forward_with_2dfan4(crop_vision_frame : VisionFrame) -> Tuple[Prediction, Prediction]:
@@ -238,3 +277,20 @@ def forward_fan_68_5(face_landmark_5 : FaceLandmark5) -> FaceLandmark68:
 		})[0][0]
 
 	return face_landmark_68_5
+
+
+def forward_fan_68_5_batch(face_landmarks_5 : numpy.ndarray) -> numpy.ndarray:
+	"""Run the ``fan_68_5`` 5->68 landmark expander over a stacked
+	``(N, 5, 2)`` batch.
+
+	When the ONNX model has a dynamic batch axis the whole batch is
+	dispatched in one ``session.run`` call; for fixed-batch models we
+	fall back to ``run_session_looped`` and the per-call output is
+	bit-equal to the historical loop.
+	"""
+	face_landmarker = get_inference_pool().get('fan_68_5')
+
+	with conditional_thread_semaphore():
+		face_landmarks_68_5 = run_with_dynamic_batch(face_landmarker, {}, 'input', face_landmarks_5)
+
+	return face_landmarks_68_5
