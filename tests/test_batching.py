@@ -84,6 +84,67 @@ def test_run_session_batched_passes_full_batch() -> None:
 	assert numpy.array_equal(result, batched_input)
 
 
+def test_run_session_batched_multi_returns_all_requested_outputs() -> None:
+	# Handler emits two outputs: (target * 1) and (target * 2). The
+	# multi-output helper must return both with their batch axes
+	# preserved, in one session.run.
+	def _handler(feed):
+		target = feed['target']
+		return [ target.copy(), (target * 2).copy() ]
+
+	session = _StubSession([ _StubInput('target', [ 'batch', 3, 4, 4 ]) ], _handler)
+	batched_input = numpy.arange(2 * 3 * 4 * 4, dtype = numpy.float32).reshape(2, 3, 4, 4)
+	output_a, output_b = batching.run_session_batched_multi(session, {}, 'target', batched_input, output_indices = (0, 1))
+
+	assert len(session.run_calls) == 1
+	assert numpy.array_equal(output_a, batched_input)
+	assert numpy.array_equal(output_b, batched_input * 2)
+
+
+def test_run_session_looped_multi_returns_all_requested_outputs() -> None:
+	def _handler(feed):
+		target = feed['target']
+		return [ target.copy(), (target * 2).copy() ]
+
+	session = _StubSession([ _StubInput('target', [ 1, 3, 4, 4 ]) ], _handler)
+	batched_input = numpy.arange(3 * 3 * 4 * 4, dtype = numpy.float32).reshape(3, 3, 4, 4)
+	output_a, output_b = batching.run_session_looped_multi(session, {}, 'target', batched_input, output_indices = (0, 1))
+
+	assert len(session.run_calls) == 3
+	assert numpy.array_equal(output_a, batched_input)
+	assert numpy.array_equal(output_b, batched_input * 2)
+
+
+def test_run_with_dynamic_batch_multi_dispatches_dynamic_path() -> None:
+	def _handler(feed):
+		target = feed['target']
+		return [ target.copy(), (target + 1).copy() ]
+
+	session = _StubSession([ _StubInput('target', [ 'batch', 3, 4, 4 ]) ], _handler)
+	batched_input = numpy.arange(2 * 3 * 4 * 4, dtype = numpy.float32).reshape(2, 3, 4, 4)
+	output_a, output_b = batching.run_with_dynamic_batch_multi(session, {}, 'target', batched_input, output_indices = (0, 1))
+
+	# Dynamic path -> exactly one session.run.
+	assert len(session.run_calls) == 1
+	assert numpy.array_equal(output_a, batched_input)
+	assert numpy.array_equal(output_b, batched_input + 1)
+
+
+def test_run_with_dynamic_batch_multi_falls_back_to_loop() -> None:
+	def _handler(feed):
+		target = feed['target']
+		return [ target.copy(), (target + 1).copy() ]
+
+	session = _StubSession([ _StubInput('target', [ 1, 3, 4, 4 ]) ], _handler)
+	batched_input = numpy.arange(3 * 3 * 4 * 4, dtype = numpy.float32).reshape(3, 3, 4, 4)
+	output_a, output_b = batching.run_with_dynamic_batch_multi(session, {}, 'target', batched_input, output_indices = (0, 1))
+
+	# Fixed batch=1 -> loop path -> N session.run.
+	assert len(session.run_calls) == 3
+	assert numpy.array_equal(output_a, batched_input)
+	assert numpy.array_equal(output_b, batched_input + 1)
+
+
 def test_run_session_looped_calls_session_per_element() -> None:
 	session = _StubSession([ _StubInput('target', [ 1, 3, 4, 4 ]) ], _identity_handler())
 	batched_input = numpy.arange(3 * 3 * 4 * 4, dtype = numpy.float32).reshape(3, 3, 4, 4)
