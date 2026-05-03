@@ -8,7 +8,7 @@ from facefusion.face_classifier import classify_face
 from facefusion.face_detector import detect_faces, detect_faces_by_angle
 from facefusion.face_helper import apply_nms, convert_to_face_landmark_5, estimate_face_angle, get_nms_threshold
 from facefusion.face_landmarker import detect_face_landmark, estimate_face_landmark_68_5
-from facefusion.face_recognizer import calculate_face_embedding
+from facefusion.face_recognizer import calculate_face_embeddings
 from facefusion.face_store import get_static_faces, set_static_faces
 from facefusion.types import BoundingBox, Face, FaceLandmark5, FaceLandmarkSet, FaceScoreSet, Score, VisionFrame
 
@@ -17,6 +17,12 @@ def create_faces(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox],
 	faces = []
 	nms_threshold = get_nms_threshold(state_manager.get_item('face_detector_model'), state_manager.get_item('face_detector_angles'))
 	keep_indices = apply_nms(bounding_boxes, face_scores, state_manager.get_item('face_detector_score'), nms_threshold)
+
+	# Phase 1 -- gather every kept face's per-face state (bounding box,
+	# score, refined landmarks) without touching the ArcFace ONNX model
+	# yet. This lets us run the recogniser exactly once for the whole
+	# frame in phase 2 instead of once per face.
+	face_records = []
 
 	for index in keep_indices:
 		bounding_box = bounding_boxes[index]
@@ -45,7 +51,17 @@ def create_faces(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox],
 			'detector': face_score,
 			'landmarker': face_landmark_score_68
 		}
-		face_embedding, face_embedding_norm = calculate_face_embedding(vision_frame, face_landmark_set.get('5/68'))
+		face_records.append((bounding_box, face_score_set, face_landmark_set, face_angle))
+
+	# Phase 2 -- compute every kept face's embedding in a single batched
+	# ArcFace call. When the ONNX model exposes a dynamic batch axis this
+	# collapses N session.run() calls into 1; otherwise it falls back to
+	# the original per-face loop (bit-equal output guaranteed).
+	face_embedding_landmarks = [ record[2].get('5/68') for record in face_records ]
+	face_embeddings = calculate_face_embeddings(vision_frame, face_embedding_landmarks)
+
+	for record, (face_embedding, face_embedding_norm) in zip(face_records, face_embeddings):
+		bounding_box, face_score_set, face_landmark_set, face_angle = record
 		gender, age, race = classify_face(vision_frame, face_landmark_set.get('5/68'))
 		faces.append(Face(
 			bounding_box = bounding_box,
