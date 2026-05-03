@@ -28,7 +28,7 @@ Thread safety mirrors the surrounding codebase -- the caller is expected to
 hold the same `thread_semaphore` / `conditional_thread_semaphore` it would
 hold around the equivalent `session.run` call. These helpers do not lock.
 """
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy
 
@@ -127,6 +127,61 @@ def run_with_dynamic_batch(
 			if on_fallback is not None:
 				on_fallback(exception)
 	return run_session_looped(session, base_inputs, batched_input_name, batched_inputs, output_index)
+
+
+def run_session_batched_multi(
+	session : Any,
+	base_inputs : Dict[str, numpy.ndarray],
+	batched_input_name : str,
+	batched_inputs : numpy.ndarray,
+	output_indices : Tuple[int, ...]
+) -> Tuple[numpy.ndarray, ...]:
+	"""Like ``run_session_batched`` but returns multiple outputs in one
+	call. Each returned array has its full batch axis preserved."""
+	feed = dict(base_inputs)
+	feed[batched_input_name] = batched_inputs
+	outputs = session.run(None, feed)
+	return tuple(outputs[i] for i in output_indices)
+
+
+def run_session_looped_multi(
+	session : Any,
+	base_inputs : Dict[str, numpy.ndarray],
+	batched_input_name : str,
+	batched_inputs : numpy.ndarray,
+	output_indices : Tuple[int, ...]
+) -> Tuple[numpy.ndarray, ...]:
+	"""Like ``run_session_looped`` but returns multiple outputs. Per-call
+	outputs are stacked along axis 0 so the result shapes match the
+	dynamic-batch path."""
+	per_output_buffers : List[List[numpy.ndarray]] = [ [] for _ in output_indices ]
+	for index in range(batched_inputs.shape[0]):
+		feed = dict(base_inputs)
+		feed[batched_input_name] = batched_inputs[index : index + 1]
+		outputs = session.run(None, feed)
+		for slot, output_index in enumerate(output_indices):
+			per_output_buffers[slot].append(outputs[output_index][0])
+	return tuple(numpy.stack(buffer, axis = 0) for buffer in per_output_buffers)
+
+
+def run_with_dynamic_batch_multi(
+	session : Any,
+	base_inputs : Dict[str, numpy.ndarray],
+	batched_input_name : str,
+	batched_inputs : numpy.ndarray,
+	output_indices : Tuple[int, ...] = (0,),
+	on_fallback : Optional[Callable[[Exception], None]] = None
+) -> Tuple[numpy.ndarray, ...]:
+	"""Multi-output variant of ``run_with_dynamic_batch``. Use this when
+	the model emits more than one output that needs to be batch-stacked
+	(e.g. 2dfan4 returns landmarks + heatmaps)."""
+	if supports_dynamic_batch(session, batched_input_name):
+		try:
+			return run_session_batched_multi(session, base_inputs, batched_input_name, batched_inputs, output_indices)
+		except Exception as exception:  # pragma: no cover - defensive
+			if on_fallback is not None:
+				on_fallback(exception)
+	return run_session_looped_multi(session, base_inputs, batched_input_name, batched_inputs, output_indices)
 
 
 def stack_prepared_frames(prepared_frames : List[VisionFrame]) -> numpy.ndarray:

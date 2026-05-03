@@ -7,7 +7,7 @@ from facefusion.common_helper import get_first
 from facefusion.face_classifier import classify_face
 from facefusion.face_detector import detect_faces, detect_faces_by_angle
 from facefusion.face_helper import apply_nms, convert_to_face_landmark_5, estimate_face_angle, get_nms_threshold
-from facefusion.face_landmarker import detect_face_landmark, estimate_face_landmark_68_5_batch
+from facefusion.face_landmarker import detect_face_landmarks_batch, estimate_face_landmark_68_5_batch
 from facefusion.face_recognizer import calculate_face_embeddings
 from facefusion.face_store import get_static_faces, set_static_faces
 from facefusion.types import BoundingBox, Face, FaceLandmark5, FaceLandmarkSet, FaceScoreSet, Score, VisionFrame
@@ -25,6 +25,21 @@ def create_faces(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox],
 	kept_face_landmarks_5 = [ face_landmarks_5[index] for index in keep_indices ]
 	kept_face_landmarks_68_5 = estimate_face_landmark_68_5_batch(kept_face_landmarks_5)
 
+	# Phase 0b -- batch the (optional) 2dfan4 / peppa_wutz refinement
+	# pass for every kept face. We pre-compute the per-face angles (a
+	# pure-CPU dependency on the fan_68_5 batch above) then dispatch one
+	# batched ONNX call per active refinement model. Stock fixed-batch
+	# models fall back to the per-face loop and stay bit-equal; user
+	# re-exports with a dynamic batch axis collapse N session.run into
+	# one per refinement model.
+	face_landmarker_score = state_manager.get_item('face_landmarker_score')
+	kept_bounding_boxes = [ bounding_boxes[index] for index in keep_indices ]
+	kept_face_angles = [ estimate_face_angle(face_landmark_68_5) for face_landmark_68_5 in kept_face_landmarks_68_5 ]
+	if face_landmarker_score > 0:
+		kept_refined_landmarks = detect_face_landmarks_batch(vision_frame, kept_bounding_boxes, kept_face_angles)
+	else:
+		kept_refined_landmarks = [ (None, 0.0) ] * len(keep_indices)
+
 	# Phase 1 -- gather every kept face's per-face state (bounding box,
 	# score, refined landmarks) without touching the ArcFace ONNX model
 	# yet. This lets us run the recogniser exactly once for the whole
@@ -39,11 +54,13 @@ def create_faces(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox],
 		face_landmark_68_5 = kept_face_landmarks_68_5[index_position]
 		face_landmark_68 = face_landmark_68_5
 		face_landmark_score_68 = 0.0
-		face_angle = estimate_face_angle(face_landmark_68_5)
+		face_angle = kept_face_angles[index_position]
 
-		if state_manager.get_item('face_landmarker_score') > 0:
-			face_landmark_68, face_landmark_score_68 = detect_face_landmark(vision_frame, bounding_box, face_angle)
-		if face_landmark_score_68 > state_manager.get_item('face_landmarker_score'):
+		if face_landmarker_score > 0:
+			refined_landmark_68, refined_score_68 = kept_refined_landmarks[index_position]
+			face_landmark_68 = refined_landmark_68
+			face_landmark_score_68 = refined_score_68
+		if face_landmark_score_68 > face_landmarker_score:
 			face_landmark_5_68 = convert_to_face_landmark_5(face_landmark_68)
 
 		face_landmark_set : FaceLandmarkSet =\

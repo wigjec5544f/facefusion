@@ -8,7 +8,7 @@ from facefusion import inference_manager, state_manager
 from facefusion.download import conditional_download_hashes, conditional_download_sources, resolve_download_url
 from facefusion.face_helper import create_rotation_matrix_and_size, estimate_matrix_by_face_landmark_5, transform_points, warp_face_by_translation
 from facefusion.filesystem import resolve_relative_path
-from facefusion.processors.batching import run_with_dynamic_batch
+from facefusion.processors.batching import run_with_dynamic_batch, run_with_dynamic_batch_multi
 from facefusion.thread_helper import conditional_thread_semaphore
 from facefusion.types import Angle, BoundingBox, DownloadScope, DownloadSet, FaceLandmark5, FaceLandmark68, InferencePool, ModelSet, Prediction, Score, VisionFrame
 
@@ -135,58 +135,123 @@ def pre_check() -> bool:
 
 
 def detect_face_landmark(vision_frame : VisionFrame, bounding_box : BoundingBox, face_angle : Angle) -> Tuple[FaceLandmark68, Score]:
-	face_landmark_2dfan4 = None
-	face_landmark_peppa_wutz = None
-	face_landmark_score_2dfan4 = 0.0
-	face_landmark_score_peppa_wutz = 0.0
-
-	if state_manager.get_item('face_landmarker_model') in [ 'many', '2dfan4' ]:
-		face_landmark_2dfan4, face_landmark_score_2dfan4 = detect_with_2dfan4(vision_frame, bounding_box, face_angle)
-
-	if state_manager.get_item('face_landmarker_model') in [ 'many', 'peppa_wutz' ]:
-		face_landmark_peppa_wutz, face_landmark_score_peppa_wutz = detect_with_peppa_wutz(vision_frame, bounding_box, face_angle)
-
-	if face_landmark_score_2dfan4 > face_landmark_score_peppa_wutz - 0.2:
-		return face_landmark_2dfan4, face_landmark_score_2dfan4
-	return face_landmark_peppa_wutz, face_landmark_score_peppa_wutz
+	# Single-face wrapper -- routes through the batched implementation
+	# with N=1 so both call sites share identical pre/post-processing.
+	# Output is bit-identical to the previous serial implementation.
+	[ result ] = detect_face_landmarks_batch(vision_frame, [ bounding_box ], [ face_angle ])
+	return result
 
 
-def detect_with_2dfan4(temp_vision_frame: VisionFrame, bounding_box: BoundingBox, face_angle: Angle) -> Tuple[FaceLandmark68, Score]:
+def detect_face_landmarks_batch(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox], face_angles : List[Angle]) -> List[Tuple[FaceLandmark68, Score]]:
+	"""Run the active 2dfan4 / peppa_wutz refinement model(s) over a list
+	of faces in one batched ONNX call per model.
+
+	Each face still has its own bounding-box-driven affine + rotation, so
+	the per-face crop preparation stays sequential -- that is pure CPU
+	work (cv2 warp + CLAHE) and is cheap relative to the ONNX call.
+	The benefit is that the heavy ONNX ``session.run`` per model now sees
+	a stacked ``(N, 3, H, W)`` batch and can collapse N round-trips into
+	one when the loaded model declares a dynamic batch axis. For the
+	stock fixed-batch shipped models we fall back to the original
+	per-face loop, so output is bit-equal in either case.
+
+	The cross-model score arbitration ("``2dfan4`` wins if its score is
+	within 0.2 of ``peppa_wutz``") is preserved verbatim; we just hoist
+	it out of the per-face loop into a per-face combination step that
+	runs after the batched ONNX calls return.
+	"""
+	if not bounding_boxes:
+		return []
+
+	landmarker_model = state_manager.get_item('face_landmarker_model')
+	use_2dfan4 = landmarker_model in [ 'many', '2dfan4' ]
+	use_peppa_wutz = landmarker_model in [ 'many', 'peppa_wutz' ]
+
+	results_2dfan4 : List[Tuple[FaceLandmark68, Score]] = []
+	results_peppa_wutz : List[Tuple[FaceLandmark68, Score]] = []
+
+	if use_2dfan4:
+		results_2dfan4 = _detect_with_2dfan4_batch(vision_frame, bounding_boxes, face_angles)
+	if use_peppa_wutz:
+		results_peppa_wutz = _detect_with_peppa_wutz_batch(vision_frame, bounding_boxes, face_angles)
+
+	combined : List[Tuple[FaceLandmark68, Score]] = []
+	for index in range(len(bounding_boxes)):
+		face_landmark_2dfan4, face_landmark_score_2dfan4 = results_2dfan4[index] if use_2dfan4 else (None, 0.0)
+		face_landmark_peppa_wutz, face_landmark_score_peppa_wutz = results_peppa_wutz[index] if use_peppa_wutz else (None, 0.0)
+
+		if face_landmark_score_2dfan4 > face_landmark_score_peppa_wutz - 0.2:
+			combined.append((face_landmark_2dfan4, face_landmark_score_2dfan4))
+		else:
+			combined.append((face_landmark_peppa_wutz, face_landmark_score_peppa_wutz))
+	return combined
+
+
+def _detect_with_2dfan4_batch(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox], face_angles : List[Angle]) -> List[Tuple[FaceLandmark68, Score]]:
 	model_size = create_static_model_set('full').get('2dfan4').get('size')
-	scale = 195 / numpy.subtract(bounding_box[2:], bounding_box[:2]).max().clip(1, None)
-	translation = (model_size[0] - numpy.add(bounding_box[2:], bounding_box[:2]) * scale) * 0.5
-	rotation_matrix, rotation_size = create_rotation_matrix_and_size(face_angle, model_size)
-	crop_vision_frame, affine_matrix = warp_face_by_translation(temp_vision_frame, translation, scale, model_size)
-	crop_vision_frame = cv2.warpAffine(crop_vision_frame, rotation_matrix, rotation_size)
-	crop_vision_frame = conditional_optimize_contrast(crop_vision_frame)
-	crop_vision_frame = crop_vision_frame.transpose(2, 0, 1).astype(numpy.float32) / 255.0
-	face_landmark_68, face_heatmap = forward_with_2dfan4(crop_vision_frame)
-	face_landmark_68 = face_landmark_68[:, :, :2][0] / 64 * 256
-	face_landmark_68 = transform_points(face_landmark_68, cv2.invertAffineTransform(rotation_matrix))
-	face_landmark_68 = transform_points(face_landmark_68, cv2.invertAffineTransform(affine_matrix))
-	face_landmark_score_68 = numpy.amax(face_heatmap, axis = (2, 3))
-	face_landmark_score_68 = numpy.mean(face_landmark_score_68)
-	face_landmark_score_68 = numpy.interp(face_landmark_score_68, [ 0, 0.9 ], [ 0, 1 ])
-	return face_landmark_68, face_landmark_score_68
+	prepared_crops : List[numpy.ndarray] = []
+	per_face_inverse_rotations : List[numpy.ndarray] = []
+	per_face_inverse_affines : List[numpy.ndarray] = []
+
+	for bounding_box, face_angle in zip(bounding_boxes, face_angles):
+		scale = 195 / numpy.subtract(bounding_box[2:], bounding_box[:2]).max().clip(1, None)
+		translation = (model_size[0] - numpy.add(bounding_box[2:], bounding_box[:2]) * scale) * 0.5
+		rotation_matrix, rotation_size = create_rotation_matrix_and_size(face_angle, model_size)
+		crop_vision_frame, affine_matrix = warp_face_by_translation(vision_frame, translation, scale, model_size)
+		crop_vision_frame = cv2.warpAffine(crop_vision_frame, rotation_matrix, rotation_size)
+		crop_vision_frame = conditional_optimize_contrast(crop_vision_frame)
+		crop_vision_frame = crop_vision_frame.transpose(2, 0, 1).astype(numpy.float32) / 255.0
+		prepared_crops.append(numpy.expand_dims(crop_vision_frame, axis = 0))
+		per_face_inverse_rotations.append(cv2.invertAffineTransform(rotation_matrix))
+		per_face_inverse_affines.append(cv2.invertAffineTransform(affine_matrix))
+
+	batched_input = numpy.concatenate(prepared_crops, axis = 0)
+	batched_landmarks, batched_heatmaps = forward_with_2dfan4_batch(batched_input)
+
+	results : List[Tuple[FaceLandmark68, Score]] = []
+	for index in range(batched_input.shape[0]):
+		face_landmark_68 = batched_landmarks[index][:, :2] / 64 * 256
+		face_landmark_68 = transform_points(face_landmark_68, per_face_inverse_rotations[index])
+		face_landmark_68 = transform_points(face_landmark_68, per_face_inverse_affines[index])
+		face_heatmap = batched_heatmaps[index]
+		face_landmark_score_68 = numpy.amax(face_heatmap, axis = (1, 2))
+		face_landmark_score_68 = numpy.mean(face_landmark_score_68)
+		face_landmark_score_68 = numpy.interp(face_landmark_score_68, [ 0, 0.9 ], [ 0, 1 ])
+		results.append((face_landmark_68, face_landmark_score_68))
+	return results
 
 
-def detect_with_peppa_wutz(temp_vision_frame : VisionFrame, bounding_box : BoundingBox, face_angle : Angle) -> Tuple[FaceLandmark68, Score]:
+def _detect_with_peppa_wutz_batch(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox], face_angles : List[Angle]) -> List[Tuple[FaceLandmark68, Score]]:
 	model_size = create_static_model_set('full').get('peppa_wutz').get('size')
-	scale = 195 / numpy.subtract(bounding_box[2:], bounding_box[:2]).max().clip(1, None)
-	translation = (model_size[0] - numpy.add(bounding_box[2:], bounding_box[:2]) * scale) * 0.5
-	rotation_matrix, rotation_size = create_rotation_matrix_and_size(face_angle, model_size)
-	crop_vision_frame, affine_matrix = warp_face_by_translation(temp_vision_frame, translation, scale, model_size)
-	crop_vision_frame = cv2.warpAffine(crop_vision_frame, rotation_matrix, rotation_size)
-	crop_vision_frame = conditional_optimize_contrast(crop_vision_frame)
-	crop_vision_frame = crop_vision_frame.transpose(2, 0, 1).astype(numpy.float32) / 255.0
-	crop_vision_frame = numpy.expand_dims(crop_vision_frame, axis = 0)
-	prediction = forward_with_peppa_wutz(crop_vision_frame)
-	face_landmark_68 = prediction.reshape(-1, 3)[:, :2] / 64 * model_size[0]
-	face_landmark_68 = transform_points(face_landmark_68, cv2.invertAffineTransform(rotation_matrix))
-	face_landmark_68 = transform_points(face_landmark_68, cv2.invertAffineTransform(affine_matrix))
-	face_landmark_score_68 = prediction.reshape(-1, 3)[:, 2].mean()
-	face_landmark_score_68 = numpy.interp(face_landmark_score_68, [ 0, 0.95 ], [ 0, 1 ])
-	return face_landmark_68, face_landmark_score_68
+	prepared_crops : List[numpy.ndarray] = []
+	per_face_inverse_rotations : List[numpy.ndarray] = []
+	per_face_inverse_affines : List[numpy.ndarray] = []
+
+	for bounding_box, face_angle in zip(bounding_boxes, face_angles):
+		scale = 195 / numpy.subtract(bounding_box[2:], bounding_box[:2]).max().clip(1, None)
+		translation = (model_size[0] - numpy.add(bounding_box[2:], bounding_box[:2]) * scale) * 0.5
+		rotation_matrix, rotation_size = create_rotation_matrix_and_size(face_angle, model_size)
+		crop_vision_frame, affine_matrix = warp_face_by_translation(vision_frame, translation, scale, model_size)
+		crop_vision_frame = cv2.warpAffine(crop_vision_frame, rotation_matrix, rotation_size)
+		crop_vision_frame = conditional_optimize_contrast(crop_vision_frame)
+		crop_vision_frame = crop_vision_frame.transpose(2, 0, 1).astype(numpy.float32) / 255.0
+		prepared_crops.append(numpy.expand_dims(crop_vision_frame, axis = 0))
+		per_face_inverse_rotations.append(cv2.invertAffineTransform(rotation_matrix))
+		per_face_inverse_affines.append(cv2.invertAffineTransform(affine_matrix))
+
+	batched_input = numpy.concatenate(prepared_crops, axis = 0)
+	batched_predictions = forward_with_peppa_wutz_batch(batched_input)
+
+	results : List[Tuple[FaceLandmark68, Score]] = []
+	for index in range(batched_input.shape[0]):
+		prediction = batched_predictions[index].reshape(-1, 3)
+		face_landmark_68 = prediction[:, :2] / 64 * model_size[0]
+		face_landmark_68 = transform_points(face_landmark_68, per_face_inverse_rotations[index])
+		face_landmark_68 = transform_points(face_landmark_68, per_face_inverse_affines[index])
+		face_landmark_score_68 = prediction[:, 2].mean()
+		face_landmark_score_68 = numpy.interp(face_landmark_score_68, [ 0, 0.95 ], [ 0, 1 ])
+		results.append((face_landmark_68, face_landmark_score_68))
+	return results
 
 
 def conditional_optimize_contrast(crop_vision_frame : VisionFrame) -> VisionFrame:
@@ -243,26 +308,32 @@ def estimate_face_landmark_68_5_batch(face_landmarks_5 : List[FaceLandmark5]) ->
 	return results
 
 
-def forward_with_2dfan4(crop_vision_frame : VisionFrame) -> Tuple[Prediction, Prediction]:
+def forward_with_2dfan4_batch(crop_vision_frames : numpy.ndarray) -> Tuple[Prediction, Prediction]:
+	"""Run the ``2dfan4`` landmarker over a stacked ``(N, 3, H, W)`` batch.
+
+	Returns the model's two outputs, each with a leading batch axis of
+	size N. When the loaded model declares a dynamic batch axis the
+	whole batch runs in one ``session.run``; otherwise we fall back to
+	``run_session_looped`` (per-call output is bit-equal to the
+	historical single-face path).
+	"""
 	face_landmarker = get_inference_pool().get('2dfan4')
 
 	with conditional_thread_semaphore():
-		prediction = face_landmarker.run(None,
-		{
-			'input': [ crop_vision_frame ]
-		})
+		landmarks, heatmaps = run_with_dynamic_batch_multi(face_landmarker, {}, 'input', crop_vision_frames, output_indices = (0, 1))
 
-	return prediction
+	return landmarks, heatmaps
 
 
-def forward_with_peppa_wutz(crop_vision_frame : VisionFrame) -> Prediction:
+def forward_with_peppa_wutz_batch(crop_vision_frames : numpy.ndarray) -> Prediction:
+	"""Run the ``peppa_wutz`` landmarker over a stacked ``(N, 3, H, W)``
+	batch. Returns ``(N, ...)``; same dynamic / fixed batch handling as
+	``forward_with_2dfan4_batch``.
+	"""
 	face_landmarker = get_inference_pool().get('peppa_wutz')
 
 	with conditional_thread_semaphore():
-		prediction = face_landmarker.run(None,
-		{
-			'input': crop_vision_frame
-		})[0]
+		prediction = run_with_dynamic_batch(face_landmarker, {}, 'input', crop_vision_frames)
 
 	return prediction
 
