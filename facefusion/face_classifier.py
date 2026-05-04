@@ -7,6 +7,7 @@ from facefusion import inference_manager
 from facefusion.download import conditional_download_hashes, conditional_download_sources, resolve_download_url
 from facefusion.face_helper import warp_face_by_face_landmark_5
 from facefusion.filesystem import resolve_relative_path
+from facefusion.processors.batching import run_with_dynamic_batch_multi
 from facefusion.thread_helper import conditional_thread_semaphore
 from facefusion.types import Age, DownloadScope, FaceLandmark5, Gender, InferencePool, ModelOptions, ModelSet, Race, VisionFrame
 
@@ -71,33 +72,82 @@ def pre_check() -> bool:
 
 
 def classify_face(temp_vision_frame : VisionFrame, face_landmark_5 : FaceLandmark5) -> Tuple[Gender, Age, Race]:
+	# Single-face wrapper -- routes through the batched implementation
+	# with N=1 so both call sites share identical pre/post-processing.
+	# Output is bit-identical to the previous serial implementation.
+	[ result ] = classify_faces(temp_vision_frame, [ face_landmark_5 ])
+	return result
+
+
+def classify_faces(temp_vision_frame : VisionFrame, face_landmarks_5 : List[FaceLandmark5]) -> List[Tuple[Gender, Age, Race]]:
+	"""Classify gender / age / race for a list of faces in
+	``temp_vision_frame`` using a single batched ``fairface`` ONNX call.
+
+	Each face is warped to the classifier's template and stacked into a
+	``(N, 3, H, W)`` batch. When the underlying ONNX model declares a
+	dynamic batch axis the entire batch runs in **one** ``session.run``;
+	otherwise we transparently fall back to the per-face loop the
+	codebase used before -- the per-face output is bit-equal in either
+	case.
+
+	Returns a list aligned with *face_landmarks_5*.
+	"""
+	if not face_landmarks_5:
+		return []
+
 	model_template = get_model_options().get('template')
 	model_size = get_model_options().get('size')
 	model_mean = get_model_options().get('mean')
 	model_standard_deviation = get_model_options().get('standard_deviation')
-	crop_vision_frame, _ = warp_face_by_face_landmark_5(temp_vision_frame, face_landmark_5, model_template, model_size)
-	crop_vision_frame = crop_vision_frame.astype(numpy.float32)[:, :, ::-1] / 255.0
-	crop_vision_frame -= model_mean
-	crop_vision_frame /= model_standard_deviation
-	crop_vision_frame = crop_vision_frame.transpose(2, 0, 1)
-	crop_vision_frame = numpy.expand_dims(crop_vision_frame, axis = 0)
-	gender_id, age_id, race_id = forward(crop_vision_frame)
-	gender = categorize_gender(gender_id[0])
-	age = categorize_age(age_id[0])
-	race = categorize_race(race_id[0])
-	return gender, age, race
+	prepared_crops : List[numpy.ndarray] = []
+
+	for face_landmark_5 in face_landmarks_5:
+		crop_vision_frame, _ = warp_face_by_face_landmark_5(temp_vision_frame, face_landmark_5, model_template, model_size)
+		crop_vision_frame = crop_vision_frame.astype(numpy.float32)[:, :, ::-1] / 255.0
+		crop_vision_frame -= model_mean
+		crop_vision_frame /= model_standard_deviation
+		crop_vision_frame = crop_vision_frame.transpose(2, 0, 1)
+		prepared_crops.append(numpy.expand_dims(crop_vision_frame, axis = 0))
+
+	batched_input = numpy.concatenate(prepared_crops, axis = 0)
+	gender_ids, age_ids, race_ids = forward_batch(batched_input)
+
+	results : List[Tuple[Gender, Age, Race]] = []
+	for index in range(batched_input.shape[0]):
+		gender = categorize_gender(gender_ids[index])
+		age = categorize_age(age_ids[index])
+		race = categorize_race(race_ids[index])
+		results.append((gender, age, race))
+	return results
 
 
 def forward(crop_vision_frame : VisionFrame) -> Tuple[List[int], List[int], List[int]]:
+	# Single-face forward kept for back-compat. Delegates to the batched
+	# entry point with N=1; bit-equal to the previous serial path.
+	gender_ids, age_ids, race_ids = forward_batch(crop_vision_frame)
+	return gender_ids, age_ids, race_ids
+
+
+def forward_batch(crop_vision_frames : numpy.ndarray) -> Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]:
+	"""Run the ``fairface`` classifier over a stacked ``(N, 3, H, W)``
+	batch.
+
+	Returns a triple ``(gender_ids, age_ids, race_ids)``, each with a
+	leading batch axis of size N. When the loaded ONNX model has a
+	dynamic batch axis the entire batch runs in one ``session.run``;
+	otherwise we fall back to ``run_session_looped_multi`` (bit-equal to
+	the historical per-face path).
+
+	NB: the upstream ``fairface`` model's output order is
+	``(race, gender, age)``; we shuffle to ``(gender, age, race)`` to
+	preserve the public API of ``forward`` and downstream call sites.
+	"""
 	face_classifier = get_inference_pool().get('face_classifier')
 
 	with conditional_thread_semaphore():
-		race_id, gender_id, age_id = face_classifier.run(None,
-		{
-			'input': crop_vision_frame
-		})
+		race_ids, gender_ids, age_ids = run_with_dynamic_batch_multi(face_classifier, {}, 'input', crop_vision_frames, output_indices = (0, 1, 2))
 
-	return gender_id, age_id, race_id
+	return gender_ids, age_ids, race_ids
 
 
 def categorize_gender(gender_id : int) -> Gender:
