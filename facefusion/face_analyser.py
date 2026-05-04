@@ -4,7 +4,7 @@ import numpy
 
 from facefusion import state_manager
 from facefusion.common_helper import get_first
-from facefusion.face_classifier import classify_face
+from facefusion.face_classifier import classify_faces
 from facefusion.face_detector import detect_faces, detect_faces_by_angle
 from facefusion.face_helper import apply_nms, convert_to_face_landmark_5, estimate_face_angle, get_nms_threshold
 from facefusion.face_landmarker import detect_face_landmarks_batch, estimate_face_landmark_68_5_batch
@@ -84,9 +84,15 @@ def create_faces(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox],
 	face_embedding_landmarks = [ record[2].get('5/68') for record in face_records ]
 	face_embeddings = calculate_face_embeddings(vision_frame, face_embedding_landmarks)
 
-	for record, (face_embedding, face_embedding_norm) in zip(face_records, face_embeddings):
+	# Phase 3 -- classify (gender, age, race) for every kept face in a
+	# single batched fairface call. Uses the same dynamic-batch helper
+	# as ArcFace (PR #16) and the landmarker batches (PR #17 / #18); for
+	# stock fixed-batch models the helper falls back to the per-face
+	# loop and the output stays bit-equal.
+	face_classifications = classify_faces(vision_frame, face_embedding_landmarks)
+
+	for record, (face_embedding, face_embedding_norm), (gender, age, race) in zip(face_records, face_embeddings, face_classifications):
 		bounding_box, face_score_set, face_landmark_set, face_angle = record
-		gender, age, race = classify_face(vision_frame, face_landmark_set.get('5/68'))
 		faces.append(Face(
 			bounding_box = bounding_box,
 			score_set = face_score_set,
