@@ -270,6 +270,15 @@ Mở rộng Đợt 1.G2 — `face_enhancer` multi-face:
 - Hỗ trợ model có 'weight' input (codeformer): weight được pass dạng base_inputs, onnxruntime broadcast theo batch axis. Nếu runtime từ chối → fallback loop bit-equal.
 - Tự động — không cần flag mới. Tăng tốc kích hoạt rõ nhất với video nhiều mặt + model dynamic batch (vd. user re-export `gpen_bfr_2048` với `dynamic_axes={'input': {0:'batch'}}`).
 
+Mở rộng Đợt 1.G2 — `expression_restorer` multi-face (LivePortrait):
+
+- `expression_restorer.restore_expression` chạy mỗi face qua **4** ONNX call: 1× `feature_extractor`, 2× `motion_extractor` (target crop + temp crop) và 1× `generator`. Khi một frame có N mặt, facefusion vốn gọi `4 × N` ONNX lần liên tiếp.
+- `restore_expressions(target_faces, target_vision_frame, temp_vision_frame)` mới check bbox theo cùng heuristic 25% margin như `face_enhancer`. **Không chồng** → warp + prepare cho cả N mặt rồi gọi mỗi model **đúng 1 lần** (`feature_extractor`, `motion_extractor` cho target stack, `motion_extractor` cho temp stack, `generator`) — tổng cộng **4 ONNX call cho cả frame**, không phụ thuộc số mặt.
+- Affine math (rotation, restrict_expression_areas, factor blend, motion-points compose) chạy per-face NumPy giữa hai batched motion-extractor và batched generator → bit-equal với loop cũ. Paste-back vẫn tuần tự.
+- Có chồng → fallback nguyên loop tuần tự `restore_expression` (giữ ngữ nghĩa khi mặt che nhau).
+- Stock LivePortrait ONNX (`live_portrait_feature_extractor` / `live_portrait_motion_extractor` / `live_portrait_generator`) hiện fixed batch=1 → mỗi `forward_*_batch` tự fallback per-face nội bộ, output bit-equal với master. Khi user re-export với `dynamic_axes={'input': {0:'batch'}}` (và `feature_volume`/`source`/`target` cho generator), CUDA/TensorRT thu hồi 4N → 4 dispatch.
+- Tự động — không cần flag mới. Tăng tốc kích hoạt rõ nhất với video group-portrait + LivePortrait re-export dynamic batch.
+
 
 Optional Python extras
 ----------------------
