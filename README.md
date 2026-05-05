@@ -289,3 +289,10 @@ Documentation
 -------------
 
 Read the [documentation](https://docs.facefusion.io) for a deep dive.
+
+Tài liệu fork (tiếng Việt):
+
+- [`ULTRA_ROADMAP.md`](./ULTRA_ROADMAP.md) — khảo sát SOTA 2024–2026 + kế hoạch
+  tích hợp vào kiến trúc facefusion (theo Đợt A → G).
+- [`WF_AUDIT.md`](./WF_AUDIT.md) — workflow audit của fork: 20 PR đã ship, tiến
+  độ vs roadmap, license blockers, technical debt và đề xuất step tiếp theo.
