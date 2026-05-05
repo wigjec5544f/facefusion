@@ -241,26 +241,42 @@ Mỗi preset có file `.ini` riêng + entry tương ứng trong `run.bat`
 ## 4. Roadmap & milestones
 
 Mỗi milestone là 1 PR độc lập, không phụ thuộc nhau (trừ khi note rõ).
+Trạng thái hiện tại tổng hợp đầy đủ ở [`WF_AUDIT.md`](./WF_AUDIT.md).
 
 ### Phase A – Quality wins ngay (ROI cao, effort thấp)
 
 - **A1.** Thêm `inswapper_512_live` vào `face_swapper` choices. Mới có ONNX,
-  drop-in. *Effort: S. VRAM: thấp.*
+  drop-in. *Effort: S. VRAM: thấp.* — **🚫 BLOCKED license**: nguồn weight
+  duy nhất (deepinsight Picsi.Ai) là academic/personal-only, không có public
+  ONNX export. Xem WF_AUDIT §5.1.
 - **A2.** Thêm `latentsync` và `musetalk_v15` vào `lip_syncer`. Cải thiện
-  lip-sync rõ rệt. *Effort: M. Cần diffusers stack.*
+  lip-sync rõ rệt. *Effort: M. Cần diffusers stack.* — **🟡 PARTIAL**:
+  PR #14 ship scaffold + `--lip-syncer-research-models` opt-in gate cho
+  `latentsync_1_5`. PR-B (sampler thật, ONNX export Whisper/VAE/UNet, DDIM)
+  cần GPU thật để verify, **chưa làm**.
 - **A3.** Thêm processor `frame_interpolator` (`rife_4.26` + `gimm_vfi`).
-  Output 60 fps mượt. *Effort: M. ONNX có sẵn cho RIFE.*
+  Output 60 fps mượt. *Effort: M. ONNX có sẵn cho RIFE.* — **✅ DONE** qua
+  PR #6 (primitive) + #7 (CLI) + #8 (`--frame-interpolator-target-fps`) +
+  #10 (`--processors frame_interpolator`).
 - **A4.** Thêm preset `ultra-fast` & `balanced` vào `.ini` + `run.bat`.
-  *Effort: S.*
+  *Effort: S.* — **✅ DONE** qua PR #1 (high-quality + run.bat) + #3
+  (balanced + fast).
+
+> Trạng thái Phase A: 2/4 done, 1/4 partial, 1/4 blocked.
 
 ### Phase B – Hạ tầng diffusion
 
 - **B1.** Tách extras: `pyproject.toml` với `[diffusion]` (diffusers,
-  transformers, accelerate, xformers). *Effort: M.*
+  transformers, accelerate, xformers). *Effort: M.* — **✅ DONE** qua PR #4
+  (`pyproject.toml` + `[dev]`/`[diffusion]`/`[api]` extras + `FACEFUSION_HF_NAMESPACE`
+  / `FACEFUSION_GH_NAMESPACE` mirror override) + PR #5 (`tools/hf_publish.py`
+  upload + CRC32 sidecar).
 - **B2.** Diffusion runtime adapter (mirror của `inference_manager` cho HF
-  pipelines, với memory offload + sequential CPU offload). *Effort: L.*
+  pipelines, với memory offload + sequential CPU offload). *Effort: L.* —
+  ⏳ not started. Cần thiết trước C1/C2.
 - **B3.** Test golden-image regression (lưu hash output trên seed cố định)
-  để bắt drift. *Effort: M.*
+  để bắt drift. *Effort: M.* — ⏳ not started. **Highly recommended** trước
+  khi ship thêm PR perf.
 
 ### Phase C – SOTA processors
 
@@ -274,11 +290,14 @@ Mỗi milestone là 1 PR độc lập, không phụ thuộc nhau (trừ khi note
 
 ### Phase D – Animation & motion
 
-- **D1.** Processor `portrait_animator` với `aniportrait`/`hallo3`. *Effort: L.*
+- **D1.** Processor `portrait_animator` với `aniportrait`/`hallo3`. *Effort: L.* —
+  **✅ DONE** qua PR #15 (LivePortrait reuse, không upload weight mới,
+  source-state LRU cache, `--portrait-animator-pose-weight` /
+  `--portrait-animator-expression-weight`). 21 test, 2 bug fix Devin Review.
 - **D2.** Processor `temporal_stabilizer` (RAFT-based optical flow first,
-  diffusion later). *Effort: L.*
+  diffusion later). *Effort: L.* — ⏳ not started.
 - **D3.** Workflow mới `audio_to_video.py` (still image + audio → talking
-  head). *Effort: M sau D1.*
+  head). *Effort: M sau D1.* — ⏳ not started.
 
 ### Phase E – Video synthesis & motion control
 
@@ -293,23 +312,34 @@ Mỗi milestone là 1 PR độc lập, không phụ thuộc nhau (trừ khi note
 
 ### Phase F – Audio & UX
 
-- **F1.** `voice_extractor` → `audio_pipeline` (denoise + separate). *Effort: M.*
+- **F1.** `voice_extractor` → `audio_pipeline` (denoise + separate). *Effort: M.* —
+  ⏳ not started.
 - **F2.** Processor `voice_cloner` (XTTS v2 / F5-TTS), **OFF mặc định** + UI
-  consent gate (không bypass content_analyser). *Effort: M.*
+  consent gate (không bypass content_analyser). *Effort: M.* — ⏳ not started.
 - **F3.** UI: progress bar chi tiết, queue persistence, preview side-by-side
-  trước/sau. *Effort: M.*
+  trước/sau. *Effort: M.* — ⏳ not started.
 - **F4.** `facefusion doctor` CLI: check ffmpeg/GPU/providers/models/disk,
-  in bảng + recommendation. *Effort: S.*
+  in bảng + recommendation. *Effort: S.* — **✅ DONE** v2 qua PR #3 (v1) +
+  PR #13 (GPU detect NVIDIA/AMD/Apple, model inventory, `--verify-models` CRC32).
 
 ### Phase G – Performance
 
 - **G1.** Pipeline streaming (decode → infer → encode qua queue, bỏ ghi PNG
-  trung gian). *Effort: L.*
-- **G2.** Dynamic batching cho swap/enhance (gom face cùng frame). *Effort: M.*
-- **G3.** ONNX `IOBinding` + `OrtValue` cho zero-copy GPU. *Effort: M.*
+  trung gian). *Effort: L.* — ⏳ not started.
+- **G2.** Dynamic batching cho swap/enhance (gom face cùng frame). *Effort: M.* —
+  **✅ DONE (widest)** qua PR #9 (infra `processors/batching.py` +
+  `face_swapper` pixel-boost) + PR #11 (`frame_enhancer` tile loop) + PR #12
+  (`face_enhancer` multi-face + bbox-overlap fallback) + PR #16
+  (`face_recognizer` ArcFace) + PR #17/#18 (`face_landmarker` `fan_68_5` /
+  `2dfan4` / `peppa_wutz`) + PR #19 (`face_classifier` fairface) + PR #20
+  (`expression_restorer` LivePortrait stack — chờ merge).
+- **G3.** ONNX `IOBinding` + `OrtValue` cho zero-copy GPU. *Effort: M.* —
+  ⏳ not started. Đề xuất next sau khi G2 lock.
 - **G4.** TensorRT EP convert + benchmark, lưu engine cache vào `.cache/trt`.
-  *Effort: L.*
-- **G5.** OpenVINO/CoreML EP cho Intel/Apple silicon. *Effort: M.*
+  *Effort: L.* — ⏳ not started.
+- **G5.** OpenVINO/CoreML EP cho Intel/Apple silicon. *Effort: M.* —
+  🟡 partial: `install.bat` (PR #1) đã hỗ trợ chọn variant `openvino`/`coreml`
+  nhưng chưa có verification path.
 
 ---
 
