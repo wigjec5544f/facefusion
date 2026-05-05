@@ -12,7 +12,7 @@ from facefusion import config, content_analyser, face_classifier, face_detector,
 from facefusion.common_helper import get_first, is_macos
 from facefusion.download import conditional_download_hashes, conditional_download_sources, resolve_download_url
 from facefusion.execution import has_execution_provider
-from facefusion.face_analyser import get_average_face, get_many_faces, get_one_face, scale_face
+from facefusion.face_analyser import get_fused_face, get_many_faces, get_one_face, scale_face
 from facefusion.face_helper import paste_back, warp_face_by_face_landmark_5
 from facefusion.face_masker import create_area_mask, create_box_mask, create_occlusion_mask, create_region_mask
 from facefusion.face_selector import select_faces, sort_faces_by_order
@@ -519,13 +519,17 @@ def register_args(program : ArgumentParser) -> None:
 		face_swapper_pixel_boost_choices = face_swapper_choices.face_swapper_set.get(known_args.face_swapper_model)
 		group_processors.add_argument('--face-swapper-pixel-boost', help = translator.get('help.pixel_boost', __package__), default = config.get_str_value('processors', 'face_swapper_pixel_boost', get_first(face_swapper_pixel_boost_choices)), choices = face_swapper_pixel_boost_choices)
 		group_processors.add_argument('--face-swapper-weight', help = translator.get('help.weight', __package__), type = float, default = config.get_float_value('processors', 'face_swapper_weight', '0.5'), choices = face_swapper_choices.face_swapper_weight_range)
-		facefusion.jobs.job_store.register_step_keys([ 'face_swapper_model', 'face_swapper_pixel_boost', 'face_swapper_weight' ])
+		group_processors.add_argument('--source-fusion-mode', help = translator.get('help.source_fusion_mode', __package__), default = config.get_str_value('processors', 'source_fusion_mode', 'mean'), choices = face_swapper_choices.source_fusion_modes)
+		group_processors.add_argument('--source-fusion-outlier-threshold', help = translator.get('help.source_fusion_outlier_threshold', __package__), type = float, default = config.get_float_value('processors', 'source_fusion_outlier_threshold', '0.65'), choices = face_swapper_choices.source_fusion_outlier_threshold_range)
+		facefusion.jobs.job_store.register_step_keys([ 'face_swapper_model', 'face_swapper_pixel_boost', 'face_swapper_weight', 'source_fusion_mode', 'source_fusion_outlier_threshold' ])
 
 
 def apply_args(args : Args, apply_state_item : ApplyStateItem) -> None:
 	apply_state_item('face_swapper_model', args.get('face_swapper_model'))
 	apply_state_item('face_swapper_pixel_boost', args.get('face_swapper_pixel_boost'))
 	apply_state_item('face_swapper_weight', args.get('face_swapper_weight'))
+	apply_state_item('source_fusion_mode', args.get('source_fusion_mode'))
+	apply_state_item('source_fusion_outlier_threshold', args.get('source_fusion_outlier_threshold'))
 
 
 def pre_check() -> bool:
@@ -778,7 +782,14 @@ def extract_source_face(source_vision_frames : List[VisionFrame]) -> Optional[Fa
 			if temp_faces:
 				source_faces.append(get_first(temp_faces))
 
-	return get_average_face(source_faces)
+	# Multi-source identity fusion (Đợt 1.C3 PR #23). Defaults to the
+	# bit-equal `mean` mode; other modes (`weighted`, `slerp`, `robust`)
+	# are opt-in via `--source-fusion-mode`. The legacy entrypoint
+	# `get_average_face` keeps the same behaviour by routing through
+	# `get_fused_face(..., mode = 'mean')`.
+	source_fusion_mode = state_manager.get_item('source_fusion_mode') or 'mean'
+	source_fusion_outlier_threshold = state_manager.get_item('source_fusion_outlier_threshold')
+	return get_fused_face(source_faces, source_fusion_mode, source_fusion_outlier_threshold)
 
 
 def process_frame(inputs : FaceSwapperInputs) -> ProcessorOutputs:

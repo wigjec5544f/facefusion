@@ -16,3 +16,5 @@ FaceSwapperModel = Literal['blendswap_256', 'ghost_1_256', 'ghost_2_256', 'ghost
 FaceSwapperWeight : TypeAlias = float
 
 FaceSwapperSet : TypeAlias = Dict[FaceSwapperModel, List[str]]
+
+SourceFusionOutlierThreshold : TypeAlias = float

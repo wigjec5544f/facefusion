@@ -1,7 +1,7 @@
 # Workflow Audit — `wigjec5544f/facefusion`
 
 > Trạng thái pipeline contribution của fork tính tới **2026-05-05**.
-> Tổng hợp 20 PR đã ship + roadmap progress + risks/debt.
+> Tổng hợp 23 PR đã ship + roadmap progress + risks/debt.
 >
 > Đây là **tài liệu audit tham chiếu**, đi kèm `ULTRA_ROADMAP.md` (kế hoạch
 > SOTA gốc) và `README.md` (hướng dẫn dùng). PR thực thi nằm tại
@@ -13,13 +13,13 @@
 
 | Hạng mục | Số liệu |
 |----------|---------|
-| Tổng PR đã mở | 20 |
-| Đã merge | 19 (PR #1–#19) |
-| Đang mở chờ review | 1 (PR #20) |
-| Roadmap milestones đã đụng | A1·A3·A4 / B1+ / D1 / F4 / G2 |
-| Roadmap milestones còn lại | A1 (block license) / A2 (block GPU) / B2 / B3 / C1–C4 / D2 / D3 / E·F·G ngoài G2 |
-| File mới (cumulative) | tools/ + processors/ + tests/ ~26 file |
-| Tests mới (cumulative) | ≥ 130 unit test (batching / doctor / interpolator / portrait_animator / lip_syncer scaffold / face_classifier ...) |
+| Tổng PR đã mở | 23 |
+| Đã merge | 21 (PR #1–#19, #21, #22) |
+| Đang mở chờ review | 2 (PR #20 expression_restorer batching, PR #23 identity ensemble) |
+| Roadmap milestones đã đụng | A1·A3·A4 / B1+ / **C3 (slice 1)** / D1 / F4 / G2 |
+| Roadmap milestones còn lại | A1 (block license) / A2 (block GPU) / B2 / B3 / C1·C2·C4 / C3 PuLID/InstantID full diffusion / D2 / D3 / E·F·G ngoài G2 |
+| File mới (cumulative) | tools/ + processors/ + tests/ ~27 file |
+| Tests mới (cumulative) | ≥ 162 unit test (batching / doctor / interpolator / portrait_animator / lip_syncer scaffold / face_classifier / **identity ensemble** ...) |
 | HF mirror | https://huggingface.co/ngoqquyen/facefusion-extras |
 
 Fork giữ nguyên license OpenRAIL-AS upstream. Không bundle weight tier 3
@@ -72,6 +72,9 @@ Quy ước áp dụng xuyên suốt 20 PR:
 | 18 | Batch `2dfan4` / `peppa_wutz` refinement | perf | merged | G2.widest #3 | face_landmarker + batching helpers + 4 test | `run_with_dynamic_batch_multi` |
 | 19 | Batch fairface gender/age/race | perf | merged | G2.widest #4 | face_classifier + face_analyser + 8 test | Phase 3 batched fairface |
 | 20 | Dynamic batching cho `expression_restorer` multi-face | perf | **open** | G2.followup | expression_restorer/core.py + 14 test | LivePortrait stack: 4×N → 4 ONNX call |
+| 21 | `WF_AUDIT.md` + README/ULTRA_ROADMAP progress refresh | docs | merged | — | WF_AUDIT.md (new) + README + ULTRA_ROADMAP | Audit báo cáo 20 PR, roadmap progress |
+| 22 | Dynamic batching cho `portrait_animator` multi-face (LivePortrait) | perf | merged | G2.followup | portrait_animator/core.py + 13 test | motion_extractor + generator: 2×N → 2 ONNX call |
+| 23 | Identity ensemble v1 — `--source-fusion-mode` mean/weighted/slerp/robust | feature | **open** | C3 (slice 1) | face_analyser.py + face_swapper plumbing + 32 test | Multi-source ArcFace fusion, default `mean` bit-equal |
 
 Numbering theo PR GitHub không theo Đợt — xem cột "Đợt" để map về roadmap.
 
@@ -327,6 +330,91 @@ per-face nội bộ → output bit-equal master.
 
 CI green, mergeable, chờ user merge.
 
+### 3.12 PR #23 — Identity ensemble v1 (Đợt 1.C3 slice 1, open)
+
+**Mục tiêu**: thay `numpy.mean` naive trong `extract_source_face` bằng 4 chiến
+lược fusion để identity bền hơn khi user pass nhiều ảnh source. Slice đầu tiên
+của roadmap mục 1.4 / Đợt C3.
+
+Bối cảnh: PuLID + InstantID nguyên gốc đều là **diffusion conditioner cho SDXL**
+(IDFormer 1024-dim → SDXL cross-attention; InstantID IP-Adapter + ControlNet),
+**không** có path standalone non-diffusion. Implement đầy đủ = ship SDXL Lightning
+(~6 GB) + GPU bắt buộc + license bundling phức tạp → defer multi-PR. Slice 1
+chỉ cải tiến phần multi-source averaging đã có trong facefusion (license sạch,
+CPU-testable, opt-in 100%). Plan đầy đủ trong `PULID_INSTANTID_PLAN.md`.
+
+**Thay đổi chính**:
+
+- `facefusion/face_analyser.py`:
+  - `get_fused_face(faces, mode, outlier_threshold)` mới — entrypoint generic.
+  - `get_average_face` route qua `get_fused_face(..., mode='mean')` → bit-equal
+    với master.
+  - 4 helper riêng: `_compute_face_quality_weights`, `_weighted_mean`,
+    `_slerp_pair` / `_fuse_slerp`, `_reject_outliers` / `_fuse_robust`.
+- `facefusion/types.py`: `SourceFusionMode = Literal['mean', 'weighted', 'slerp', 'robust']`.
+- `facefusion/processors/modules/face_swapper/`:
+  - `core.py` — register `--source-fusion-mode` + `--source-fusion-outlier-threshold`,
+    apply vào state, `extract_source_face` đọc state và gọi `get_fused_face`.
+  - `types.py` — `SourceFusionOutlierThreshold`.
+  - `choices.py` — `source_fusion_modes`, `source_fusion_outlier_threshold_range`.
+  - `locales.py` — help string + UI label.
+- `facefusion.ini`: thêm 2 key config trống (default ở CLI side là `mean` / `0.65`).
+- 4 mode:
+  - `mean` (default) — `numpy.mean(face_embeddings, axis=0)` bit-equal master.
+  - `weighted` — `Σ w_i * e_i / Σ w_i`, weight = `detector × landmarker_factor ×
+    (1 + sqrt(bbox_area)/256)`. Floor 0.1 cho landmarker khi disabled.
+  - `slerp` — pairwise spherical interp tích lũy `t_i = 1/(i+1)` trên
+    `embedding_norm` (giữ unit norm). Raw `embedding` = unit direction × mean
+    magnitude của source raws.
+  - `robust` — cosine sim từng face vs centroid; loại face dưới threshold
+    (default 0.65) rồi `weighted` trên survivor. Giữ ít nhất 1 face nếu mọi
+    face đều bị flag.
+- 32 test trong `tests/test_identity_ensemble.py`:
+  - Quality weight (4 test): detector score / bbox area / landmarker disabled / all-zero fallback.
+  - `_weighted_mean` (2): explicit formula + uniform = arithmetic mean.
+  - `_slerp_pair` (4): t=0/t=1 endpoints, unit-norm output, collinear handling.
+  - `_reject_outliers` (4): drops outlier / keeps consistent / keeps closest when all flagged / single face short-circuit.
+  - `get_fused_face` dispatch (10): None for empty, mean bit-equal, single-face short-circuit, metadata preserved, weighted favors high score, slerp unit norm, slerp 45° midpoint, robust rejects outlier, robust = weighted when consistent, ValueError on unknown mode.
+  - `get_average_face` back-compat (2).
+  - `extract_source_face` plumbing (3): default mean, robust state plumbing, no-face → None.
+  - `register_args` + `apply_args` (2).
+  - Module sanity (1).
+
+**License & runtime**:
+
+- ✅ License sạch — chỉ tái dùng ArcFace `arcface_w600k_r50` đã có trong fork.
+- ✅ Không upload weight mới, không pull dependency mới.
+- ✅ CPU-testable (toàn bộ test stub-based, không cần ONNX).
+- ✅ Bit-equal default — rollback an toàn.
+
+**Kích hoạt**:
+
+```bash
+python facefusion.py headless-run \
+  --source-paths id_a.jpg id_b.jpg id_c.jpg id_d.jpg blur_or_other.jpg \
+  --target-path video.mp4 --output-path swap.mp4 \
+  --processors face_swapper \
+  --source-fusion-mode robust \
+  --source-fusion-outlier-threshold 0.65
+```
+
+**Quality lift đo được** (synthetic 512-dim embedding, không cần ONNX):
+
+- `weighted`: 4 source nét + 1 source blur → output bias về nét, identity drift
+  giảm so với `numpy.mean`.
+- `slerp`: 2 source ortho → output unit vector ở 45° (`1/sqrt(2)` trên 2 trục
+  đầu), không bị "kéo về 0" như naive mean.
+- `robust`: 4 source ID-A + 1 source flip 180° → output không bị contamination
+  (test `test_get_fused_face_robust_rejects_outlier`).
+
+**Bị defer / không làm trong PR này**:
+
+- AdaFace cross-encoder (cần upload `adaface_ir101.onnx` lên HF mirror) →
+  PR follow-up tùy chọn.
+- Full PuLID/InstantID diffusion (SDXL Lightning + IDFormer + IP-Adapter +
+  ControlNet) → multi-PR sau A1 + A2 + GPU CI ready.
+- Thay đổi inswapper inference path — chỉ thay đổi cách tính source embedding.
+
 ---
 
 ## 4. Roadmap progress (vs `ULTRA_ROADMAP.md`)
@@ -354,7 +442,8 @@ CI green, mergeable, chờ user merge.
 |-----|-------|--------|
 | C1 | `face_enhancer` `hypir` / `supir_face` backend | not started |
 | C2 | `face_swapper` `reface_diffusion` backend | not started |
-| C3 | Identity ensemble (ArcFace + AdaFace + MagFace + multi-source) | not started |
+| C3 | Identity ensemble (ArcFace + AdaFace + MagFace + multi-source) | 🟡 partial — slice 1 done (PR #23: multi-source fusion 4 mode) |
+| C3+ | PuLID + InstantID full diffusion stack (SDXL backbone) | deferred — research, GPU-only |
 | C4 | `image_restorer` whole-frame | not started |
 
 ### Phase D — Animation & motion
