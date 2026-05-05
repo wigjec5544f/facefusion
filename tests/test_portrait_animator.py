@@ -283,16 +283,19 @@ def test_process_frame_invokes_animate_per_target_face() -> None:
 	fake_faces = [ object(), object() ]
 	animate_calls : list = []
 
-	def _animate(face, target_frame, temp_frame):
-		animate_calls.append(face)
+	def _animate_portraits(faces, target_frame, temp_frame):
+		animate_calls.extend(faces)
 		return temp_frame
 
 	with \
 		patch.object(portrait_animator_core, 'select_faces', return_value = fake_faces), \
 		patch.object(portrait_animator_core, 'scale_face', side_effect = lambda face, t, te : face), \
-		patch.object(portrait_animator_core, 'animate_portrait', side_effect = _animate):
+		patch.object(portrait_animator_core, 'animate_portraits', side_effect = _animate_portraits):
 		out_frame, out_mask = portrait_animator_core.process_frame(inputs)
 
+	# `animate_portraits` is now the single dispatcher: it receives all
+	# scaled faces in one call and delegates to the batched / sequential
+	# path internally.
 	assert animate_calls == fake_faces
 	assert out_mask is mask
 
