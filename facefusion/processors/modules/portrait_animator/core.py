@@ -37,7 +37,7 @@ identity but modulates expression).
 """
 from argparse import ArgumentParser
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy
@@ -52,13 +52,14 @@ from facefusion.face_helper import paste_back, warp_face_by_face_landmark_5
 from facefusion.face_masker import create_box_mask, create_occlusion_mask
 from facefusion.face_selector import select_faces, sort_faces_by_order
 from facefusion.filesystem import filter_image_paths, has_image, in_directory, is_image, is_video, resolve_relative_path, same_file_extension
+from facefusion.processors.batching import supports_dynamic_batch
 from facefusion.processors.live_portrait import create_rotation, limit_expression
 from facefusion.processors.modules.portrait_animator import choices as portrait_animator_choices
 from facefusion.processors.modules.portrait_animator.types import PortraitAnimatorInputs
 from facefusion.processors.types import LivePortraitExpression, LivePortraitFeatureVolume, LivePortraitMotionPoints, LivePortraitPitch, LivePortraitRoll, LivePortraitScale, LivePortraitTranslation, LivePortraitYaw, ProcessorOutputs
 from facefusion.program_helper import find_argument_group
 from facefusion.thread_helper import conditional_thread_semaphore, thread_semaphore
-from facefusion.types import ApplyStateItem, Args, DownloadScope, Face, InferencePool, ModelOptions, ModelSet, ProcessMode, VisionFrame
+from facefusion.types import ApplyStateItem, Args, BoundingBox, DownloadScope, Face, InferencePool, ModelOptions, ModelSet, ProcessMode, VisionFrame
 from facefusion.vision import read_static_image, read_static_images, read_static_video_frame
 
 # Cache of the per-source-portrait "rest state" (appearance feature
@@ -281,6 +282,119 @@ def animate_portrait(target_face : Face, target_vision_frame : VisionFrame, temp
 	return paste_back(temp_vision_frame, animated_crop, crop_mask, affine_matrix)
 
 
+def animate_portraits(target_faces : List[Face], target_vision_frame : VisionFrame, temp_vision_frame : VisionFrame) -> VisionFrame:
+	"""Animate every face in ``target_faces`` against the same source portrait.
+
+	When the target faces' bounding boxes do not overlap, all crops are
+	pushed through ``motion_extractor`` and ``generator`` in **batched**
+	session.run calls (one per ONNX model, regardless of face count).
+	The cached source ``feature_volume`` is broadcast across the batch
+	via ``numpy.repeat``. Output is bit-equal to the per-face loop because
+	no face's paste-back affects another face's warp region.
+
+	If any pair of bounding boxes intersect (with a 25% conservative
+	margin to cover the wider warp region) the second face's warp would
+	sample pixels modified by the first face's paste-back, so we
+	transparently fall back to the original per-face loop -- still
+	bit-equal.
+	"""
+	if not target_faces:
+		return temp_vision_frame
+	if len(target_faces) == 1 or _faces_overlap([ face.bounding_box for face in target_faces ]):
+		for target_face in target_faces:
+			temp_vision_frame = animate_portrait(target_face, target_vision_frame, temp_vision_frame)
+		return temp_vision_frame
+
+	source_state = _resolve_source_state()
+	if source_state is None:
+		# pre_process should have rejected this, but never silently emit
+		# garbage if a caller bypasses validation.
+		return temp_vision_frame
+
+	model_template = get_model_options().get('template')
+	model_size = get_model_options().get('size')
+	pose_weight = float(numpy.interp(float(state_manager.get_item('portrait_animator_pose_weight') or 0), [ 0, 100 ], [ 0.0, 1.0 ]))
+	expression_weight = float(numpy.interp(float(state_manager.get_item('portrait_animator_expression_weight') or 0), [ 0, 100 ], [ 0.0, 1.0 ]))
+
+	prepared_target_crops : List[VisionFrame] = []
+	contexts : List[Tuple[numpy.ndarray, List[numpy.ndarray], Tuple[int, int]]] = []
+
+	for target_face in target_faces:
+		# Driving motion (pose / expression) MUST come from the original
+		# target frame; mirrors the split used by ``animate_portrait``.
+		target_crop_vision_frame, _ = warp_face_by_face_landmark_5(target_vision_frame, target_face.landmark_set.get('5/68'), model_template, model_size)
+		temp_crop_vision_frame, affine_matrix = warp_face_by_face_landmark_5(temp_vision_frame, target_face.landmark_set.get('5/68'), model_template, model_size)
+
+		box_mask = create_box_mask(temp_crop_vision_frame, state_manager.get_item('face_mask_blur'), (0, 0, 0, 0))
+		crop_masks = [ box_mask ]
+		if 'occlusion' in (state_manager.get_item('face_mask_types') or []):
+			crop_masks.append(create_occlusion_mask(temp_crop_vision_frame))
+
+		prepared_target_crops.append(prepare_crop_frame(target_crop_vision_frame))
+		contexts.append((affine_matrix, crop_masks, (temp_crop_vision_frame.shape[1], temp_crop_vision_frame.shape[0])))
+
+	target_crops_stacked = numpy.concatenate(prepared_target_crops, axis = 0)
+	tgt_pitches, tgt_yaws, tgt_rolls, _, _, tgt_expressions, _ = forward_extract_motion_batch(target_crops_stacked)
+
+	target_motion_points_list : List[numpy.ndarray] = []
+
+	for index in range(len(target_faces)):
+		tgt_pitch = tgt_pitches[index : index + 1]
+		tgt_yaw = tgt_yaws[index : index + 1]
+		tgt_roll = tgt_rolls[index : index + 1]
+		tgt_expression = tgt_expressions[index : index + 1]
+
+		driven_pitch = source_state['pitch'] + (tgt_pitch - source_state['pitch']) * pose_weight
+		driven_yaw = source_state['yaw'] + (tgt_yaw - source_state['yaw']) * pose_weight
+		driven_roll = source_state['roll'] + (tgt_roll - source_state['roll']) * pose_weight
+		driven_expression = source_state['expression'] + (tgt_expression - source_state['expression']) * expression_weight
+		driven_expression = limit_expression(driven_expression)
+
+		driven_rotation = create_rotation(driven_pitch, driven_yaw, driven_roll)
+		driven_motion_points = source_state['scale'] * (source_state['motion_points'] @ driven_rotation.T + driven_expression) + source_state['translation']
+		target_motion_points_list.append(driven_motion_points)
+
+	target_motion_points_stacked = numpy.concatenate(target_motion_points_list, axis = 0)
+	# ``rest_motion_points`` is shared across all faces (depends only on
+	# the cached source state); broadcast it to (N, ...) so the generator
+	# receives matching batch axes for every input.
+	rest_motion_points_stacked = numpy.repeat(source_state['rest_motion_points'], len(target_faces), axis = 0)
+	feature_volumes_stacked = numpy.repeat(source_state['feature_volume'], len(target_faces), axis = 0)
+
+	generated_batch = forward_generate_frame_batch(feature_volumes_stacked, target_motion_points_stacked, rest_motion_points_stacked)
+
+	for index, (affine_matrix, crop_masks, target_size) in enumerate(contexts):
+		animated_crop = normalize_crop_frame(generated_batch[index])
+		animated_crop = cv2.resize(animated_crop, target_size, interpolation = cv2.INTER_CUBIC)
+		crop_mask = numpy.minimum.reduce(crop_masks).clip(0, 1)
+		temp_vision_frame = paste_back(temp_vision_frame, animated_crop, crop_mask, affine_matrix)
+	return temp_vision_frame
+
+
+def _faces_overlap(bounding_boxes : List[BoundingBox]) -> bool:
+	"""Return True if any pair of bounding boxes intersect, with a small
+	conservative expansion to cover the wider warp region used by
+	``warp_face_by_face_landmark_5``. If in doubt the caller should fall
+	back to the sequential loop, which is always bit-equal."""
+	expansion = 0.25
+	expanded : List[Tuple[float, float, float, float]] = []
+	for box in bounding_boxes:
+		left, top, right, bottom = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+		width = right - left
+		height = bottom - top
+		dx = width * expansion
+		dy = height * expansion
+		expanded.append((left - dx, top - dy, right + dx, bottom + dy))
+
+	for index in range(len(expanded)):
+		left_i, top_i, right_i, bottom_i = expanded[index]
+		for other_index in range(index + 1, len(expanded)):
+			left_j, top_j, right_j, bottom_j = expanded[other_index]
+			if left_i < right_j and left_j < right_i and top_i < bottom_j and top_j < bottom_i:
+				return True
+	return False
+
+
 def forward_extract_feature(crop_vision_frame : VisionFrame) -> LivePortraitFeatureVolume:
 	feature_extractor = get_inference_pool().get('feature_extractor')
 
@@ -317,6 +431,64 @@ def forward_generate_frame(feature_volume : LivePortraitFeatureVolume, source_mo
 		})[0][0]
 
 	return crop_vision_frame
+
+
+def forward_extract_motion_batch(crop_vision_frames : numpy.ndarray) -> Tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray, numpy.ndarray]:
+	"""Run ``motion_extractor`` once across a stacked ``(N, ...)`` batch
+	of crops. Returns the same 7-tuple of arrays as
+	``forward_extract_motion`` but with a leading ``N`` axis on each. With
+	a dynamic-batch ONNX export this collapses the per-face loop into a
+	single ``session.run`` call; otherwise the helper falls back to N
+	sequential calls so the per-face slice is bit-equal."""
+	motion_extractor = get_inference_pool().get('motion_extractor')
+
+	with conditional_thread_semaphore():
+		if supports_dynamic_batch(motion_extractor, 'input'):
+			try:
+				outputs = motion_extractor.run(None, { 'input': crop_vision_frames })
+				return tuple(outputs[index] for index in range(7))  # type: ignore[return-value]
+			except Exception:  # pragma: no cover - defensive fall-through
+				pass
+		per_face_outputs : List[List[numpy.ndarray]] = [ [] for _ in range(7) ]
+		for index in range(crop_vision_frames.shape[0]):
+			outputs = motion_extractor.run(None, { 'input': crop_vision_frames[index : index + 1] })
+			for slot in range(7):
+				per_face_outputs[slot].append(outputs[slot])
+	return tuple(numpy.concatenate(buffer, axis = 0) for buffer in per_face_outputs)  # type: ignore[return-value]
+
+
+def forward_generate_frame_batch(feature_volumes : numpy.ndarray, source_motion_points : numpy.ndarray, target_motion_points : numpy.ndarray) -> numpy.ndarray:
+	"""Run ``generator`` once across a stacked ``(N, ...)`` batch.
+	Each input has its own dynamic-batch axis; if any input is fixed
+	batch=1 we fall back to N sequential calls. Returns a (N, C, H, W)
+	array."""
+	generator = get_inference_pool().get('generator')
+
+	with thread_semaphore():
+		if (
+			supports_dynamic_batch(generator, 'feature_volume')
+			and supports_dynamic_batch(generator, 'source')
+			and supports_dynamic_batch(generator, 'target')
+		):
+			try:
+				return generator.run(None,
+				{
+					'feature_volume': feature_volumes,
+					'source': source_motion_points,
+					'target': target_motion_points
+				})[0]
+			except Exception:  # pragma: no cover - defensive fall-through
+				pass
+		per_face : List[numpy.ndarray] = []
+		for index in range(feature_volumes.shape[0]):
+			generated = generator.run(None,
+			{
+				'feature_volume': feature_volumes[index : index + 1],
+				'source': source_motion_points[index : index + 1],
+				'target': target_motion_points[index : index + 1]
+			})[0]
+			per_face.append(generated)
+	return numpy.concatenate(per_face, axis = 0)
 
 
 def prepare_crop_frame(crop_vision_frame : VisionFrame) -> VisionFrame:
@@ -426,8 +598,7 @@ def process_frame(inputs : PortraitAnimatorInputs) -> ProcessorOutputs:
 	target_faces = select_faces(reference_vision_frame, target_vision_frame)
 
 	if target_faces:
-		for target_face in target_faces:
-			target_face = scale_face(target_face, target_vision_frame, temp_vision_frame)
-			temp_vision_frame = animate_portrait(target_face, target_vision_frame, temp_vision_frame)
+		scaled_faces = [ scale_face(target_face, target_vision_frame, temp_vision_frame) for target_face in target_faces ]
+		temp_vision_frame = animate_portraits(scaled_faces, target_vision_frame, temp_vision_frame)
 
 	return temp_vision_frame, temp_vision_mask
