@@ -1,7 +1,8 @@
 from typing import List, Sequence, get_args
 
 from facefusion.common_helper import create_float_range
-from facefusion.processors.modules.face_swapper.types import FaceSwapperModel, FaceSwapperSet, FaceSwapperWeight
+from facefusion.processors.modules.face_swapper.types import FaceSwapperModel, FaceSwapperSet, FaceSwapperWeight, SourceFusionOutlierThreshold
+from facefusion.types import SourceFusionMode
 
 
 face_swapper_set : FaceSwapperSet =\
@@ -24,3 +25,7 @@ face_swapper_set : FaceSwapperSet =\
 face_swapper_models : List[FaceSwapperModel] = list(get_args(FaceSwapperModel))
 
 face_swapper_weight_range : Sequence[FaceSwapperWeight] = create_float_range(0.0, 1.0, 0.05)
+
+source_fusion_modes : List[SourceFusionMode] = list(get_args(SourceFusionMode))
+
+source_fusion_outlier_threshold_range : Sequence[SourceFusionOutlierThreshold] = create_float_range(0.0, 1.0, 0.05)

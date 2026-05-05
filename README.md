@@ -271,6 +271,45 @@ Mở rộng Đợt 1.G2 — `face_enhancer` multi-face:
 - Tự động — không cần flag mới. Tăng tốc kích hoạt rõ nhất với video nhiều mặt + model dynamic batch (vd. user re-export `gpen_bfr_2048` với `dynamic_axes={'input': {0:'batch'}}`).
 
 
+Identity ensemble (multi-source fusion)
+---------------------------------------
+
+Khi pass nhiều ảnh source qua `--source-paths` / `-s`, face_swapper vốn
+tính identity bằng `numpy.mean` thẳng trên ArcFace embeddings của từng
+ảnh — naive averaging, không phân biệt ảnh nét vs ảnh blur, và bất kỳ
+source lệch identity nào (vd. nhỡ pass nhầm ảnh người khác) đều kéo kết
+quả về phía outlier. Đợt 1.C3 thêm `--source-fusion-mode` cho 4 chiến
+lược fusion:
+
+| Mode | Mô tả |
+| --- | --- |
+| `mean` (mặc định) | Hành vi cũ — `numpy.mean(face_embeddings, axis=0)`. Bit-equal với master. |
+| `weighted` | Trung bình có trọng số = `detector_score × landmarker_factor × (1 + sqrt(bbox_area)/256)`. Ưu tiên ảnh nét + crop lớn. |
+| `slerp` | Spherical linear interpolation tích lũy trên hyper-sphere của normalized embedding. Bảo toàn `||embedding_norm|| = 1`, tránh hiện tượng "trung bình về 0" khi 2 source có angle lớn. |
+| `robust` | Đo cosine sim của mỗi source với centroid; loại source dưới `--source-fusion-outlier-threshold` (mặc định 0.65) rồi `weighted` trên survivor. Giữ ít nhất 1 source nếu mọi source đều bị flag. |
+
+Ví dụ:
+
+```
+python facefusion.py headless-run \
+  --source-paths id_a.jpg id_b.jpg id_c.jpg id_d.jpg blur_or_other.jpg \
+  --target-path video.mp4 \
+  --output-path swap.mp4 \
+  --processors face_swapper \
+  --source-fusion-mode robust \
+  --source-fusion-outlier-threshold 0.65
+```
+
+Toàn bộ logic ở `facefusion.face_analyser.get_fused_face`; `extract_source_face`
+trong face_swapper module đọc state để chọn mode. Không thêm ONNX mới,
+không yêu cầu re-download weight, license sạch (chỉ tái dùng ArcFace embedding
+đã có). Mặc định `mean` đảm bảo rollback an toàn.
+
+> Phương án đầy đủ PuLID + InstantID (diffusion conditioner SDXL/FLUX)
+> được defer sang PR riêng — xem `WF_AUDIT.md §7` và
+> `PULID_INSTANTID_PLAN.md` để biết lý do.
+
+
 Optional Python extras
 ----------------------
 

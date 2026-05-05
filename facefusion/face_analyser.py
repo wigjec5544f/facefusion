@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy
 
@@ -10,7 +10,7 @@ from facefusion.face_helper import apply_nms, convert_to_face_landmark_5, estima
 from facefusion.face_landmarker import detect_face_landmarks_batch, estimate_face_landmark_68_5_batch
 from facefusion.face_recognizer import calculate_face_embeddings
 from facefusion.face_store import get_static_faces, set_static_faces
-from facefusion.types import BoundingBox, Face, FaceLandmark5, FaceLandmarkSet, FaceScoreSet, Score, VisionFrame
+from facefusion.types import BoundingBox, Embedding, Face, FaceLandmark5, FaceLandmarkSet, FaceScoreSet, Score, SourceFusionMode, VisionFrame
 
 
 def create_faces(vision_frame : VisionFrame, bounding_boxes : List[BoundingBox], face_scores : List[Score], face_landmarks_5 : List[FaceLandmark5]) -> List[Face]:
@@ -115,28 +115,138 @@ def get_one_face(faces : List[Face], position : int = 0) -> Optional[Face]:
 
 
 def get_average_face(faces : List[Face]) -> Optional[Face]:
-	face_embeddings = []
-	face_embeddings_norm = []
+	# Backwards-compatible entrypoint -- routes through `get_fused_face`
+	# in the bit-equal `mean` mode so existing callers (and the historical
+	# numpy.mean output) are preserved exactly.
+	return get_fused_face(faces, 'mean', None)
 
-	if faces:
-		first_face = get_first(faces)
 
-		for face in faces:
-			face_embeddings.append(face.embedding)
-			face_embeddings_norm.append(face.embedding_norm)
+def get_fused_face(faces : List[Face], mode : SourceFusionMode = 'mean', outlier_threshold : Optional[float] = None) -> Optional[Face]:
+	if not faces:
+		return None
+	first_face = get_first(faces)
 
-		return Face(
-			bounding_box = first_face.bounding_box,
-			score_set = first_face.score_set,
-			landmark_set = first_face.landmark_set,
-			angle = first_face.angle,
-			embedding = numpy.mean(face_embeddings, axis = 0),
-			embedding_norm = numpy.mean(face_embeddings_norm, axis = 0),
-			gender = first_face.gender,
-			age = first_face.age,
-			race = first_face.race
-		)
-	return None
+	if mode == 'mean' or len(faces) == 1:
+		face_embeddings = [ face.embedding for face in faces ]
+		face_embeddings_norm = [ face.embedding_norm for face in faces ]
+		embedding = numpy.mean(face_embeddings, axis = 0)
+		embedding_norm = numpy.mean(face_embeddings_norm, axis = 0)
+	elif mode == 'weighted':
+		embedding, embedding_norm = _fuse_weighted(faces)
+	elif mode == 'slerp':
+		embedding, embedding_norm = _fuse_slerp(faces)
+	elif mode == 'robust':
+		embedding, embedding_norm = _fuse_robust(faces, outlier_threshold)
+	else:
+		raise ValueError('unknown source fusion mode: ' + str(mode))
+
+	return Face(
+		bounding_box = first_face.bounding_box,
+		score_set = first_face.score_set,
+		landmark_set = first_face.landmark_set,
+		angle = first_face.angle,
+		embedding = embedding,
+		embedding_norm = embedding_norm,
+		gender = first_face.gender,
+		age = first_face.age,
+		race = first_face.race
+	)
+
+
+def _compute_face_quality_weights(faces : List[Face]) -> 'numpy.ndarray':
+	# Per-face quality weight = detector score x landmarker factor x
+	# (1 + sqrt(bbox area) / 256). The bbox term rewards source faces
+	# that occupy more pixels (more identity signal) without dominating
+	# when bboxes are similar in size. When the landmarker is disabled
+	# (`face_landmarker_score == 0`) every face has score 0; we apply a
+	# constant 0.1 floor so the weight reduces to detector x area.
+	weights = []
+	for face in faces:
+		detector_score = max(float(face.score_set.get('detector', 0.0)), 0.0)
+		landmarker_score = max(float(face.score_set.get('landmarker', 0.0)), 0.0)
+		landmarker_factor = landmarker_score if landmarker_score > 0.0 else 0.1
+		bbox_w = max(float(face.bounding_box[2] - face.bounding_box[0]), 0.0)
+		bbox_h = max(float(face.bounding_box[3] - face.bounding_box[1]), 0.0)
+		area_factor = 1.0 + numpy.sqrt(bbox_w * bbox_h) / 256.0
+		weights.append(detector_score * landmarker_factor * area_factor)
+	weights_arr = numpy.array(weights, dtype = numpy.float64)
+	if not numpy.any(weights_arr > 0.0):
+		# All-zero weights (e.g. detector score absent in a stub) -> uniform.
+		weights_arr = numpy.ones(len(faces), dtype = numpy.float64)
+	return weights_arr
+
+
+def _weighted_mean(values : List['numpy.ndarray'], weights : 'numpy.ndarray') -> 'numpy.ndarray':
+	stacked = numpy.stack(values, axis = 0)
+	normalised = weights / weights.sum()
+	return numpy.tensordot(normalised, stacked, axes = 1)
+
+
+def _fuse_weighted(faces : List[Face]) -> Tuple[Embedding, Embedding]:
+	weights = _compute_face_quality_weights(faces)
+	face_embeddings = [ face.embedding for face in faces ]
+	face_embeddings_norm = [ face.embedding_norm for face in faces ]
+	return _weighted_mean(face_embeddings, weights), _weighted_mean(face_embeddings_norm, weights)
+
+
+def _slerp_pair(a : 'numpy.ndarray', b : 'numpy.ndarray', t : float) -> 'numpy.ndarray':
+	# Spherical linear interpolation between two vectors at param t in
+	# [0, 1]. Inputs are renormalised first, output is a unit vector.
+	a_unit = a / max(float(numpy.linalg.norm(a)), 1e-12)
+	b_unit = b / max(float(numpy.linalg.norm(b)), 1e-12)
+	dot = float(numpy.clip(numpy.dot(a_unit, b_unit), -1.0, 1.0))
+	if dot > 0.9995:
+		# Vectors near-collinear -- linear interp + renormalise avoids the
+		# 1/sin(omega) singularity.
+		result = (1.0 - t) * a_unit + t * b_unit
+		return result / max(float(numpy.linalg.norm(result)), 1e-12)
+	omega = numpy.arccos(dot)
+	sin_omega = numpy.sin(omega)
+	return (numpy.sin((1.0 - t) * omega) / sin_omega) * a_unit + (numpy.sin(t * omega) / sin_omega) * b_unit
+
+
+def _fuse_slerp(faces : List[Face]) -> Tuple[Embedding, Embedding]:
+	# Sequentially slerp normalised embeddings with cumulative parameter
+	# t = 1/(i+1) so the final vector is the spherical centroid of all
+	# sources. Output `embedding_norm` is a unit vector; raw `embedding`
+	# is the unit direction scaled by the mean magnitude of source raws
+	# so downstream consumers that rescale (e.g. inswapper) keep working.
+	face_embeddings_norm = [ face.embedding_norm for face in faces ]
+	embedding_norm = face_embeddings_norm[0] / max(float(numpy.linalg.norm(face_embeddings_norm[0])), 1e-12)
+	for index in range(1, len(face_embeddings_norm)):
+		embedding_norm = _slerp_pair(embedding_norm, face_embeddings_norm[index], 1.0 / (index + 1))
+	magnitudes = [ float(numpy.linalg.norm(face.embedding)) for face in faces ]
+	mean_magnitude = float(numpy.mean(magnitudes))
+	embedding = embedding_norm * mean_magnitude
+	return embedding, embedding_norm
+
+
+def _reject_outliers(faces : List[Face], threshold : float) -> List[Face]:
+	if len(faces) <= 1:
+		return list(faces)
+	face_embeddings_norm = numpy.stack([ face.embedding_norm for face in faces ], axis = 0)
+	centroid = numpy.mean(face_embeddings_norm, axis = 0)
+	centroid_unit = centroid / max(float(numpy.linalg.norm(centroid)), 1e-12)
+	similarities = []
+	for face in faces:
+		face_norm = face.embedding_norm
+		face_unit = face_norm / max(float(numpy.linalg.norm(face_norm)), 1e-12)
+		similarities.append(float(numpy.dot(face_unit, centroid_unit)))
+	similarities_arr = numpy.array(similarities, dtype = numpy.float64)
+	keep_mask = similarities_arr >= threshold
+	if not numpy.any(keep_mask):
+		# All faces flagged as outliers (vs. their own centroid) -- keep
+		# only the single face closest to the centroid so the caller still
+		# gets a usable identity instead of `None`.
+		closest_index = int(numpy.argmax(similarities_arr))
+		return [ faces[closest_index] ]
+	return [ face for face, keep in zip(faces, keep_mask) if bool(keep) ]
+
+
+def _fuse_robust(faces : List[Face], outlier_threshold : Optional[float]) -> Tuple[Embedding, Embedding]:
+	threshold = 0.65 if outlier_threshold is None else float(outlier_threshold)
+	survivors = _reject_outliers(faces, threshold)
+	return _fuse_weighted(survivors)
 
 
 def get_many_faces(vision_frames : List[VisionFrame]) -> List[Face]:

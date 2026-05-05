@@ -32,6 +32,7 @@ Embedding : TypeAlias = NDArray[numpy.float64]
 Gender = Literal['female', 'male']
 Age : TypeAlias = range
 Race = Literal['white', 'black', 'latino', 'asian', 'indian', 'arabic']
+SourceFusionMode = Literal['mean', 'weighted', 'slerp', 'robust']
 Face = namedtuple('Face',
 [
 	'bounding_box',

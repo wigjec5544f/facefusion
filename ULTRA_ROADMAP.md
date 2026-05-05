@@ -93,6 +93,12 @@ Hầu hết swap hiện chỉ dùng 1 ArcFace embedding. SOTA 2025 dùng:
 - Hỗ trợ ensemble `arcface_w600k_r50` + `adaface_ir101` + `magface`.
 - Cho phép nhiều ảnh source và lấy mean embedding (đã có 1 phần qua
   `get_average_face`); thêm weighted average + outlier rejection.
+  ✅ **Đợt 1.C3 PR #23** — `get_fused_face` ship 4 mode
+  (`mean` / `weighted` / `slerp` / `robust`) qua `--source-fusion-mode`.
+  Default `mean` bit-equal master. Logic ở `facefusion.face_analyser`,
+  state plumbing trong face_swapper. License sạch (chỉ tái dùng ArcFace
+  có sẵn). AdaFace cross-encoder + PuLID/InstantID full diffusion stack
+  vẫn pending (xem `WF_AUDIT.md §7` + `PULID_INSTANTID_PLAN.md`).
 - Hook để feed embedding mở rộng vào các processor diffusion (PuLID/InstantID).
 
 ### 1.5. Face / image restoration (thay frame_enhancer + face_enhancer)
